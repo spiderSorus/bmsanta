@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-daemon/inverter_bus.py - Inverter Communication Gateway (RS-485 Modbus RTU & CAN)
-Exposes aggregated battery bank state to solar hybrid inverters (Growatt, Sol-Ark, Deye, Victron).
+daemon/inverter_bus.py - Inverter Communication Gateway (RS-485 Modbus RTU & Pylontech ASCII & CAN)
+Exposes aggregated battery bank state to solar hybrid inverters (PowMr, Growatt, Sol-Ark, Deye, Victron).
 Supports:
-1. RS-485 Modbus RTU Server over /dev/ttyUSB0 (RJ45 cable).
-2. Pylontech CAN emulation over secondary CAN bus (can1).
+1. Dual-Protocol RS-485 Serial Server on /dev/ttyUSB0:
+   - Pylontech RS-485 ASCII Protocol (Used by PowMr Program 05: LIB-485, Program 43: PYL)
+   - Standard Modbus RTU Function 0x03 (Used by PowMr / SRNE / Custom Modbus)
+2. Pylontech CAN Emulation on secondary CAN bus (can1).
 """
 
 import time
@@ -12,7 +14,7 @@ import socket
 import struct
 import threading
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 from daemon.aggregator import BankState
 
 logger = logging.getLogger("bmsanta.inverter_bus")
@@ -32,10 +34,30 @@ def calc_crc16_modbus(data: bytes) -> int:
     return crc
 
 
-class ModbusRtuInverterGateway:
+def calculate_pylon_lchksum(lenid: int) -> int:
+    """Calculates 4-bit nibble checksum for Pylontech LENID."""
+    s = ((lenid >> 8) & 0x0F) + ((lenid >> 4) & 0x0F) + (lenid & 0x0F)
+    return (-s) & 0x0F
+
+
+def build_pylon_length(lenid: int) -> str:
+    """Builds 4-character hex ASCII string combining LCHKSUM and LENID."""
+    lchk = calculate_pylon_lchksum(lenid)
+    return f"{(lchk << 12) | (lenid & 0x0FFF):04X}"
+
+
+def calculate_pylon_chksum(frame_body_ascii: str) -> str:
+    """Calculates 16-bit Pylontech frame checksum across all ASCII bytes between ~ and CHKSUM."""
+    total = sum(frame_body_ascii.encode("ascii")) % 0x10000
+    chksum = (~total + 1) & 0xFFFF
+    return f"{chksum:04X}"
+
+
+class InverterSerialGateway:
     """
-    Lightweight, robust Modbus RTU slave server for RS-485 serial ports (/dev/ttyUSB0).
-    Answers Read Holding Registers (Function Code 0x03).
+    Dual-protocol RS-485 serial worker for /dev/ttyUSB0 (Xiusiyt RJ45 cable).
+    Automatically detects and handles both Pylontech RS-485 ASCII queries (PowMr LIB-485/PYL)
+    and standard Modbus RTU requests (Function Code 0x03).
     """
 
     def __init__(self, port: str = "/dev/ttyUSB0", baudrate: int = 9600, slave_id: int = 1):
@@ -59,10 +81,10 @@ class ModbusRtuInverterGateway:
                 timeout=0.05
             )
             self._running = True
-            self._thread = threading.Thread(target=self._run_loop, name="ModbusRtuWorker", daemon=True)
+            self._thread = threading.Thread(target=self._run_loop, name="InverterSerialWorker", daemon=True)
             self._thread.start()
-            logger.info("Modbus RTU Inverter Gateway started on %s @ %d baud (Slave ID: %d)",
-                        self.port, self.baudrate, self.slave_id)
+            logger.info("Inverter RS-485 Gateway started on %s @ %d baud (Pylontech & Modbus RTU)",
+                        self.port, self.baudrate)
         except Exception as e:
             logger.warning("Could not open RS-485 port %s: %s (Inverter RS-485 disabled)", self.port, e)
 
@@ -78,24 +100,100 @@ class ModbusRtuInverterGateway:
     def update_state(self, state: BankState):
         self.latest_state = state
 
+    # --- Pylontech RS-485 Protocol Handler ---
+    def _handle_pylontech_frame(self, frame_str: str) -> Optional[bytes]:
+        """
+        Parses an incoming Pylontech ASCII request:
+        ~VER(2) + ADR(2) + CID1(2) + CID2(2) + LENGTH(4) + [INFO] + CHKSUM(4) + \r
+        """
+        st = self.latest_state
+        if not st or len(frame_str) < 14:
+            return None
+
+        clean = frame_str.strip("~\r\n")
+        if len(clean) < 12:
+            return None
+
+        ver = clean[0:2]
+        adr = clean[2:4]
+        cid1 = clean[4:6]
+        cid2 = clean[6:8]
+
+        logger.debug("Pylontech RX: VER=%s ADR=%s CID1=%s CID2=%s", ver, adr, cid1, cid2)
+
+        # CID1 = 46 (Battery telemetry / management group)
+        if cid1 != "46":
+            return None
+
+        # 1. CID2 = 47: Charge & Discharge Management Info
+        if cid2 == "47":
+            cvl_mv = 28400  # 28.40V absorption
+            ccl_da = int(st.safety.ccl_amps * 10)
+            dcl_da = int(st.safety.dcl_amps * 10)
+            cutoff_mv = 21000  # 21.00V low cutoff
+            status_flags = 0xC0 if (st.safety.charge_enabled and st.safety.discharge_enabled) else 0x00
+            if not st.safety.charge_enabled:
+                status_flags &= ~0x80
+            if not st.safety.discharge_enabled:
+                status_flags &= ~0x40
+
+            info = f"{cvl_mv:04X}{ccl_da:04X}{dcl_da:04X}{cutoff_mv:04X}{status_flags:02X}"
+            length_str = build_pylon_length(len(info))
+            body = f"{ver}{adr}{cid1}00{length_str}{info}"
+            chk = calculate_pylon_chksum(body)
+            logger.info("Replying Pylontech CID2=47 (CVL=%.2fV CCL=%.0fA DCL=%.0fA)",
+                        cvl_mv/1000.0, ccl_da/10.0, dcl_da/10.0)
+            return f"~{body}{chk}\r".encode("ascii")
+
+        # 2. CID2 = 42: Analog Telemetry (Cell voltages, temps, V, I, Ah)
+        elif cid2 == "42":
+            info_flag = "01"
+            pack_idx = "01"
+
+            # 8 cell voltages in mV
+            mod_data = next(iter(st.module_details.values()), None) if st.module_details else None
+            cells = mod_data["cells"] if mod_data else [3.238] * 8
+            cell_hex = "".join(f"{int(c * 1000):04X}" for c in cells[:8])
+
+            # 2 temperatures in deci-Kelvin: (T_C + 273.15) * 10
+            temps = mod_data["temps_c"] if mod_data else [st.avg_temp_c, st.avg_temp_c]
+            temp_hex = "".join(f"{int((t + 273.15) * 10):04X}" for t in temps[:2])
+
+            cur_hex = "0000"  # 0.1A signed
+            pack_v_hex = f"{int(st.bank_voltage * 1000):04X}"
+            rem_ah_hex = f"{int(st.total_capacity_ah * (st.soc_pct / 100.0) * 100):04X}"
+            tot_ah_hex = f"{int(st.total_capacity_ah * 100):04X}"
+            cycles_hex = "000A"
+
+            info = f"{info_flag}{pack_idx}08{cell_hex}02{temp_hex}{cur_hex}{pack_v_hex}{rem_ah_hex}{tot_ah_hex}{cycles_hex}"
+            length_str = build_pylon_length(len(info))
+            body = f"{ver}{adr}{cid1}00{length_str}{info}"
+            chk = calculate_pylon_chksum(body)
+            logger.info("Replying Pylontech CID2=42 (V=%.3fV SOC=%d%% Delta=%.1fmV)",
+                        st.bank_voltage, int(st.soc_pct), st.delta_cell_mv)
+            return f"~{body}{chk}\r".encode("ascii")
+
+        # 3. CID2 = 44: Alarms & Warnings
+        elif cid2 == "44":
+            # Normal / healthy = 00 across all fields
+            info = "010108" + ("00" * 8) + "02" + ("00" * 2) + "0000"
+            length_str = build_pylon_length(len(info))
+            body = f"{ver}{adr}{cid1}00{length_str}{info}"
+            chk = calculate_pylon_chksum(body)
+            return f"~{body}{chk}\r".encode("ascii")
+
+        # 4. CID2 = 51 / 92: Protocol Version & Hardware Info
+        elif cid2 in ["51", "92"]:
+            info = "20"
+            length_str = build_pylon_length(len(info))
+            body = f"{ver}{adr}{cid1}00{length_str}{info}"
+            chk = calculate_pylon_chksum(body)
+            return f"~{body}{chk}\r".encode("ascii")
+
+        return None
+
+    # --- Modbus RTU Protocol Handler ---
     def _build_holding_registers(self) -> dict:
-        """
-        Maps BankState to standard solar inverter battery registers:
-        0x0000: Bank Voltage (0.01 V, e.g. 2588 = 25.88V)
-        0x0001: Bank Current (0.1 A, signed)
-        0x0002: SOC % (0 - 100)
-        0x0003: SOH % (0 - 100)
-        0x0004: Average Temp (0.1 °C, e.g. 225 = 22.5°C)
-        0x0005: Charge Voltage Limit CVL (0.01 V, e.g. 2840 = 28.40V)
-        0x0006: Charge Current Limit CCL (0.1 A, e.g. 500 = 50.0A)
-        0x0007: Discharge Current Limit DCL (0.1 A, e.g. 1000 = 100.0A)
-        0x0008: Discharge Cutoff Voltage (0.01 V, e.g. 2100 = 21.00V)
-        0x0009: Min Cell Voltage (mV, e.g. 3236)
-        0x000A: Max Cell Voltage (mV, e.g. 3238)
-        0x000B: Cell Delta (mV, e.g. 2)
-        0x000C: Status Bitmask (Bit 0: Healthy, Bit 1: Charge OK, Bit 2: Discharge OK)
-        0x000D: Online Modules Count
-        """
         st = self.latest_state
         if not st:
             return {r: 0 for r in range(16)}
@@ -120,14 +218,14 @@ class ModbusRtuInverterGateway:
 
         return {
             0: v_centi,
-            1: 0,           # Current (0 if no shunt installed yet)
+            1: 0,
             2: soc,
             3: soh,
             4: temp_deci,
-            5: 2840,        # CVL = 28.40 V (3.55V * 8)
+            5: 2840,
             6: ccl_deci,
             7: dcl_deci,
-            8: 2100,        # UVP Cutoff = 21.00 V
+            8: 2100,
             9: min_cell_mv,
             10: max_cell_mv,
             11: delta_mv,
@@ -143,10 +241,28 @@ class ModbusRtuInverterGateway:
                 if data:
                     buf.extend(data)
 
-                # Standard Modbus Read Holding Registers frame is 8 bytes:
-                # [SlaveID, Func(0x03), StartAddr_Hi, StartAddr_Lo, Qty_Hi, Qty_Lo, CRC_Lo, CRC_Hi]
+                # --- 1. Check for Pylontech ASCII Frame (starts with '~' / 0x7E) ---
+                if 0x7E in buf:
+                    idx = buf.find(0x7E)
+                    if idx > 0:
+                        buf = buf[idx:]  # align to start of frame
+
+                    if 0x0D in buf:  # end of line (\r)
+                        end_idx = buf.find(0x0D)
+                        frame_bytes = buf[:end_idx + 1]
+                        buf = buf[end_idx + 1:]
+                        try:
+                            frame_str = frame_bytes.decode("ascii", errors="ignore")
+                            resp = self._handle_pylontech_frame(frame_str)
+                            if resp:
+                                self._serial.write(resp)
+                        except Exception as e:
+                            logger.error("Error processing Pylontech frame: %s", e)
+                        continue
+
+                # --- 2. Check for Modbus RTU Frame ---
                 if len(buf) >= 8:
-                    if buf[0] == self.slave_id and buf[1] == 0x03:
+                    if buf[0] == self.slave_id and buf[1] in [0x03, 0x04]:
                         req_crc = buf[6] | (buf[7] << 8)
                         calc_crc = calc_crc16_modbus(buf[:6])
                         if req_crc == calc_crc:
@@ -154,7 +270,7 @@ class ModbusRtuInverterGateway:
                             qty = (buf[4] << 8) | buf[5]
                             regs = self._build_holding_registers()
 
-                            resp_bytes = bytearray([self.slave_id, 0x03, qty * 2])
+                            resp_bytes = bytearray([self.slave_id, buf[1], qty * 2])
                             for r in range(start_reg, start_reg + qty):
                                 val = regs.get(r, 0) & 0xFFFF
                                 resp_bytes.extend(struct.pack(">H", val))
@@ -164,22 +280,30 @@ class ModbusRtuInverterGateway:
                             resp_bytes.append((crc >> 8) & 0xFF)
 
                             self._serial.write(resp_bytes)
+                            logger.info("Replying Modbus RTU (Start=%d Qty=%d)", start_reg, qty)
                             buf.clear()
                             continue
 
-                    # If sync lost, pop one byte and re-scan
-                    buf.pop(0)
+                    # If sync lost and not Pylontech, advance one byte
+                    if not (0x7E in buf):
+                        buf.pop(0)
+
                 elif not data:
                     time.sleep(0.01)
+
             except Exception as e:
-                logger.error("Modbus worker exception: %s", e)
+                logger.error("Inverter serial worker exception: %s", e)
                 time.sleep(0.1)
+
+
+# Maintain backward compatibility alias
+ModbusRtuInverterGateway = InverterSerialGateway
 
 
 class PylontechCanGateway:
     """
     Emulates standard Pylontech CAN 2.0B broadcast frames (0x359, 0x351, 0x355, 0x356)
-    over CAN1 (or configurable CAN interface) to connect directly to Inverter BMS CAN ports.
+    over CAN1 to connect directly to Inverter BMS CAN ports.
     """
 
     def __init__(self, interface: str = "can1"):
@@ -226,7 +350,6 @@ class PylontechCanGateway:
             st = self.latest_state
             if st and st.online_modules > 0:
                 # 0x351: Charge & Discharge parameters
-                # [CVL_Lo, CVL_Hi, CCL_Lo, CCL_Hi, DCL_Lo, DCL_Hi, DischCutoff_Lo, DischCutoff_Hi]
                 cvl = 284  # 28.4V (0.1V)
                 ccl = int(st.safety.ccl_amps * 10)
                 dcl = int(st.safety.dcl_amps * 10)
@@ -235,14 +358,12 @@ class PylontechCanGateway:
                 self._send_can(0x351, p_351)
 
                 # 0x355: SOC and SOH
-                # [SOC_Lo, SOC_Hi, SOH_Lo, SOH_Hi]
                 soc = int(st.soc_pct)
                 soh = int(st.soh_pct)
                 p_355 = struct.pack("<HH", soc, soh)
                 self._send_can(0x355, p_355)
 
                 # 0x356: Voltage, Current, Temperature
-                # [V_Lo, V_Hi, I_Lo, I_Hi, T_Lo, T_Hi]
                 v_centi = int(st.bank_voltage * 100)
                 cur_deci = 0
                 temp_deci = int((st.avg_temp_c) * 10)
