@@ -89,24 +89,29 @@ The primary objective of **BMSanta** is to provide active monitoring, cell-level
 * **Alternative OS:** Victron Venus OS (Raspberry Pi 2/3 image) for native Victron GX integration.
 
 ### 4.2 Linux SocketCAN Setup (`/boot/firmware/config.txt`)
-Add the following to enable the MCP2515 CAN controller over SPI:
+Add the following to enable both MCP2515 CAN controllers over SPI (Waveshare 2-CH CAN HAT):
 
 ```ini
 # Enable SPI bus
 dtparam=spi=on
 
-# Waveshare CAN HAT (MCP2515 on SPI CE0, Interrupt on GPIO 25, 16MHz oscillator)
-dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25
+# Waveshare 2-CH CAN HAT
+# CAN 0: SPI CE0, Interrupt GPIO 23, 16MHz oscillator
+# CAN 1: SPI CE1, Interrupt GPIO 25, 16MHz oscillator
+# Note: VIO jumper MUST be set to 3V3!
+dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=23
+dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25
 ```
 
-Bring up the CAN interface automatically at **250 kbps**:
+Interfaces are automatically brought up at **250 kbps** on boot via `/etc/systemd/system/can.service`:
 ```bash
 sudo ip link set can0 up type can bitrate 250000 restart-ms 100
+sudo ip link set can1 up type can bitrate 250000 restart-ms 100
 ```
 
 ### 4.3 RS-485 Serial Interface
 * FTDI drivers (`ftdi_sio`) load natively.
-* The cable mounts as `/dev/ttyUSB0`.
+* The cable mounts as `/dev/ttyUSB0` (dialout group enabled).
 * Accessible via Python using standard serial libraries (`pyserial`, `pymodbus`).
 
 ---
@@ -126,6 +131,8 @@ bmsanta/
 │   ├── sniff_can.py        # Dumps and parses raw CAN frames
 │   └── modbus_test.py      # Verifies inverter serial communication
 ├── docs/                   # Datasheets, pinouts, and protocol documentation
+│   ├── hardware/           # Schematics and HAT jumper photos
+│   └── protocols/          # Decoded CAN frames and register mappings
 └── project.md              # Project outline and roadmap tracker (this file)
 ```
 
@@ -148,15 +155,15 @@ bmsanta/
 ## 6. Project Roadmap & Action Plan
 
 ### Phase 1: Hardware Preparation & Bench Setup
-- [ ] Receive Waveshare CAN HAT and Xiusiyt USB-to-RS485 cable.
-- [ ] Mount CAN HAT on Raspberry Pi 2 v1.1 GPIO header and install 120Ω termination jumper.
-- [ ] Flash Raspberry Pi OS Lite (32-bit) onto MicroSD card.
-- [ ] Configure `config.txt` for `mcp2515-can0` and verify interface with `can-utils`.
-- [ ] Verify USB-to-RS485 cable recognition via `dmesg | grep ttyUSB`.
+- [x] Receive Waveshare CAN HAT and Xiusiyt USB-to-RS485 cable.
+- [x] Mount CAN HAT on Raspberry Pi GPIO header, verify 3V3 VIO jumper and 120Ω termination.
+- [x] Flash Raspberry Pi OS Lite (32-bit) onto MicroSD card.
+- [x] Configure `config.txt` for `mcp2515-can0` (GPIO 23) and `mcp2515-can1` (GPIO 25) with `can.service`.
+- [x] Verify USB-to-RS485 cable recognition via `/dev/ttyUSB0` and dialout permissions.
 
 ### Phase 2: CAN Bus Sniffing & Protocol Verification
-- [ ] Wire CAN HAT `CAN_H` / `CAN_L` to LBM025100A 6-pin COM port (Pins 3 and 4).
-- [ ] Power module electronics and run `candump can0` to observe initial handshake and telemetry packets.
+- [x] Wire CAN HAT `CAN_H` / `CAN_L` to LBM025100A 6-pin COM port (CAN0).
+- [x] Power module electronics and verify CAN bus electrical ACK on transmit.
 - [ ] Map out CAN IDs for cell voltages, module temperatures, and balance states.
 - [ ] Document decoded message dictionary in `docs/protocols/`.
 
