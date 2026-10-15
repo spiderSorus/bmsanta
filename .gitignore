@@ -1,0 +1,16 @@
+# Disk images and backups
+*.img
+*.img.gz
+*.iso
+*.tar.gz
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Temporary data and logs
+*.log
+zero.tmp

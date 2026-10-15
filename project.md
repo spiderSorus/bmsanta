@@ -164,16 +164,19 @@ bmsanta/
 ### Phase 2: CAN Bus Sniffing & Protocol Verification
 - [x] Wire CAN HAT `CAN_H` / `CAN_L` to LBM025100A 6-pin COM port (CAN0).
 - [x] Power module electronics and verify CAN bus electrical ACK on transmit.
-- [ ] Map out CAN IDs for cell voltages, module temperatures, and balance states.
-- [ ] Document decoded message dictionary in `docs/protocols/`.
+- [x] Map out CAN IDs for cell voltages, module temperatures, and balance states.
+- [x] Document decoded message dictionary in `docs/protocols/huasi_bme.md`.
 
 ### Phase 3: Core Daemon & Multi-Module Aggregation
-- [ ] Implement `battery_bus.py` with Python SocketCAN listeners.
-- [ ] Build `aggregator.py` to support $N$ parallel modules simultaneously.
-- [ ] Implement safety protection matrix (`safety.py`) with configurable cutoffs and hysteresis.
+- [x] Implement `battery_bus.py` with Python SocketCAN listeners & auto-discovery.
+- [x] Build `aggregator.py` to support $N$ parallel modules simultaneously.
+- [x] Implement safety protection matrix (`safety.py`) with configurable cutoffs and dynamic CCL/DCL derating.
+- [x] Create `systemd/bmsanta.service` running daemon at 1 Hz on boot.
 
 ### Phase 4: Inverter Gateway & Field Deployment
-- [ ] Connect RS-485 cable to solar inverter RJ45 communication port.
-- [ ] Implement Modbus RTU / inverter protocol driver in `inverter_bus.py`.
-- [ ] Verify closed-loop inverter control (dynamic charging voltage, current limits).
-- [ ] Deploy local WebUI or Home Assistant MQTT bridge.
+- [x] Implement Modbus RTU / RS-485 inverter server in `inverter_bus.py` (`/dev/ttyUSB0`).
+- [x] Implement Pylontech CAN broadcast gateway in `inverter_bus.py` (`can1`).
+- [x] Deploy embedded dark-mode WebUI dashboard on port 5000 (`http://<ip>:5000`).
+- [ ] Connect RS-485 / CAN cable to physical solar hybrid inverter RJ45 communication port.
+- [ ] Verify closed-loop inverter control with live hybrid inverter (e.g. Sol-Ark, Growatt, Deye).
+- [ ] Optional: Home Assistant MQTT auto-discovery bridge.
