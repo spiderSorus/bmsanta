@@ -180,3 +180,34 @@ bmsanta/
 - [ ] Connect RS-485 / CAN cable to physical solar hybrid inverter RJ45 communication port.
 - [ ] Verify closed-loop inverter control with live hybrid inverter (e.g. Sol-Ark, Growatt, Deye).
 - [ ] Optional: Home Assistant MQTT auto-discovery bridge.
+
+---
+
+## 7. Deployment, Packaging & Backup Strategy
+
+### 7.1 Automated Installation
+The repository includes an all-in-one automated installer [`install.sh`](file:///Users/csorus/Workspace/bmsanta/install.sh):
+```bash
+git clone https://github.com/<user>/bmsanta.git ~/bmsanta
+cd ~/bmsanta
+sudo ./install.sh
+```
+This script handles:
+1. Apt dependency installation (`python3-can`, `python3-serial`, `can-utils`, `iproute2`).
+2. Dialout, GPIO, and SPI group permission grants.
+3. `/boot/firmware/config.txt` kernel overlay validation for Waveshare MCP2515 controllers.
+4. Installation and activation of `can.service` and `bmsanta.service`.
+5. Automatic bring-up of `can0` and WebUI dashboard on port `5000`.
+
+### 7.2 Standalone Release Packaging
+Run [`package.sh`](file:///Users/csorus/Workspace/bmsanta/package.sh) to generate an offline, self-contained distribution archive:
+```bash
+./package.sh
+# Outputs: dist/bmsanta-v0.1.0.tar.gz + SHA-256 checksum
+```
+
+### 7.3 System Backups
+* **OS Baseline MicroSD Image:** Stored locally at `bmsanta-baseline.img.gz` (1.0 GB compressed raw image). Flashable directly with Raspberry Pi Imager or `dd`.
+* **Hardware Config Backup:** Stored in `config/config.txt.example`.
+* **System Services:** Preserved in `systemd/can.service` and `systemd/bmsanta.service`.
+

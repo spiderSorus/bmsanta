@@ -1,0 +1,19 @@
+# ==============================================================================
+# BMSanta Raspberry Pi config.txt Hardware Configuration
+# Waveshare 2-CH Isolated CAN HAT (MCP2515 over SPI)
+# Place at: /boot/firmware/config.txt (or /boot/config.txt)
+# ==============================================================================
+
+# Enable SPI bus controller
+dtparam=spi=on
+
+# Waveshare 2-CH CAN HAT Overlays
+# CAN0: SPI CE0, Interrupt GPIO 23, 16MHz crystal
+dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=23
+
+# CAN1: SPI CE1, Interrupt GPIO 25, 16MHz crystal
+dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25
+
+# IMPORTANT HARDWARE JUMPER:
+# The yellow logic voltage jumper (VIO) on the bottom right of the Waveshare HAT
+# MUST be set to: [3V3 - VIO] (NOT 5V).

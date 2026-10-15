@@ -3,6 +3,8 @@
 *.img.gz
 *.iso
 *.tar.gz
+*.sha256
+dist/
 
 # Python bytecode and caches
 __pycache__/
