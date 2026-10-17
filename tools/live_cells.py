@@ -94,7 +94,7 @@ def read_daemon_status():
         if os.path.exists(path):
             try:
                 mtime = os.path.getmtime(path)
-                if time.time() - mtime < 3.0:
+                if abs(time.time() - mtime) < 10.0:
                     with open(path, "r") as f:
                         return json.load(f)
             except Exception:
