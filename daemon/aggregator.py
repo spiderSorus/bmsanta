@@ -81,6 +81,8 @@ class Aggregator:
     def __init__(self, safety_thresholds: Optional[SafetyThresholds] = None):
         self.safety_mgr = SafetyManager(safety_thresholds or SafetyThresholds())
         self.state = BankState()
+        self._filtered_soc: Optional[float] = None
+        self._prev_mod_count: int = 0
 
     def update(self, modules: Dict[int, ModuleTelemetry]) -> BankState:
         """
@@ -91,6 +93,8 @@ class Aggregator:
         mod_count = len(online_mods)
 
         if mod_count == 0:
+            self._filtered_soc = None
+            self._prev_mod_count = 0
             self.state = BankState(
                 timestamp=now,
                 online_modules=0,
@@ -147,9 +151,20 @@ class Aggregator:
 
         min_temp = min(all_temps) if all_temps else 25.0
         max_temp = max(all_temps) if all_temps else 25.0
-        avg_temp = sum(all_temps) / len(all_temps) if all_temps else 25.0
+        raw_soc = estimate_soc_lfp(avg_pack_v)
 
-        soc = estimate_soc_lfp(avg_pack_v)
+        # Smooth SOC with Exponential Moving Average (EMA)
+        # Snap immediately if module count changes or first evaluation
+        if self._filtered_soc is None or mod_count != self._prev_mod_count:
+            self._filtered_soc = raw_soc
+            self._prev_mod_count = mod_count
+        else:
+            # Gentle alpha=0.05 (~20s time constant) to filter millivolt ADC jitter
+            # Slew faster (alpha=0.20) if a major shift (>15%) occurs
+            alpha = 0.20 if abs(raw_soc - self._filtered_soc) > 15.0 else 0.05
+            self._filtered_soc = (1.0 - alpha) * self._filtered_soc + alpha * raw_soc
+
+        soc = round(self._filtered_soc, 1)
 
         # Run safety evaluation
         safety_status = self.safety_mgr.evaluate(
