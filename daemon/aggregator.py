@@ -112,10 +112,12 @@ class Aggregator:
                 if c > 1.0:
                     all_cells.append((c, m.node_id, idx))
 
-            pack_idx = (m.node_id - 0xAA) + 1 if m.node_id >= 0xAA else m.node_id
+            pack_idx = getattr(m, 'pack_index', (m.node_id - 0xAA) + 1 if m.node_id >= 0xAA else m.node_id)
+            hw_nid = getattr(m, 'hw_node_id', m.node_id)
             mod_details[m.node_id] = {
                 "pack_num": pack_idx,
                 "node_hex": f"0x{m.node_id:02X}",
+                "hw_node_hex": f"0x{hw_nid:02X}",
                 "pack_v": round(m.pack_v, 3),
                 "cells": [round(c, 3) for c in m.cells],
                 "temps_c": [round(t, 1) for t in m.temps],

@@ -662,12 +662,15 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             `;
           });
 
+          const hwBadge = (m.hw_node_hex && m.hw_node_hex !== nodeHex) ? `<span class="node-pill" style="color:#7dd3fc; border-color:#0284c7;">CAN ${m.hw_node_hex}</span>` : '';
+
           packsHtml += `
             <div class="pack-card">
               <div class="pack-header">
                 <div class="pack-title-grp">
                   <span class="pack-pill">BATTERY #${packNum}</span>
                   <span class="node-pill">${nodeHex}</span>
+                  ${hwBadge}
                   <span class="badge badge-success" style="padding:2px 8px; font-size:0.7rem;">● ONLINE</span>
                 </div>
                 <div class="pack-v-grp">

@@ -24,6 +24,8 @@ class ModuleTelemetry:
     node_id: int
     is_online: bool = False
     last_seen: float = 0.0
+    hw_node_id: int = 0xAA
+    pack_index: int = 1
     cells: List[float] = field(default_factory=lambda: [0.0] * 8)
     temps: List[float] = field(default_factory=lambda: [0.0, 0.0])  # in Celsius
     temps_f: List[float] = field(default_factory=lambda: [0.0, 0.0])  # in Fahrenheit
@@ -39,15 +41,17 @@ class ModuleTelemetry:
 
 class BatteryBus:
     """
-    Manages low-level CAN communication with one or more CATL LBM025100A modules.
-    Supports daisy-chained parallel packs sharing an interface and CAN ID.
+    Manages low-level CAN communication with CATL LBM025100A modules.
+    Supports single-bus daisy chains with any mix of shared (0xAA) or distinct (0xAA..0xB9) node IDs.
     """
 
     def __init__(self, interface: str = "can1", candidate_nodes: Optional[List[int]] = None):
         self.interface = interface
-        self.candidate_nodes = candidate_nodes or [0xAA + i for i in range(16)]  # 0xAA to 0xB9 (up to 16 packs)
+        self.candidate_nodes = candidate_nodes or [0xAA + i for i in range(16)]  # 0xAA to 0xB9
+        self.active_hw_nodes: List[int] = [0xAA]  # physical query IDs returning responses
         self.modules: Dict[int, ModuleTelemetry] = {}
         self.active_nodes: List[int] = []
+        self._hw_status_cache: Dict[int, List[dict]] = {}
         self._sock: Optional[socket.socket] = None
         self._last_discovery_time = 0.0
         self.discovery_interval = 30.0  # seconds
@@ -128,143 +132,177 @@ class BatteryBus:
                 break
         return frames
 
-    def poll_node(self, node_id: int) -> bool:
-        """
-        Polls for Cell Voltages (0x13) and Temperatures (0x14).
-        Seamlessly supports up to 8+ daisy-chained packs answering to node ID.
-        """
+    def _query_hw_pack_data(self, hw_nid: int) -> List[dict]:
+        """Queries a physical CAN ID for cell voltages (0x13) and temperatures (0x14)."""
         if not self._sock:
-            return False
+            return []
 
-        # --- 1. Query Cell Voltages (Cmd 0x13) ---
-        p_v = bytes([node_id, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        # 1. Voltages (Cmd 0x13)
+        p_v = bytes([hw_nid, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_v)
-        time.sleep(0.03)
+        time.sleep(0.04)
         v_frames = self._drain_can_rx(timeout_sec=0.25)
 
-        # --- 2. Query Temperatures (Cmd 0x14) ---
-        p_t = bytes([node_id, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        # 2. Temperatures (Cmd 0x14)
+        p_t = bytes([hw_nid, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_t)
-        time.sleep(0.03)
+        time.sleep(0.04)
         t_frames = self._drain_can_rx(timeout_sec=0.15)
 
-        # Collect all response frames for this query
-        lower_halves = [data for cid, dlc, data in v_frames if cid == (0x18001300 | node_id) and dlc == 8]
-        upper_halves = [data for cid, dlc, data in v_frames if cid == (0x18011300 | node_id) and dlc == 8]
-        temp_packets = [data for cid, dlc, data in t_frames if cid == (0x18001400 | node_id) and dlc >= 4]
+        lower_halves = [data for cid, dlc, data in v_frames if cid == (0x18001300 | hw_nid) and dlc == 8]
+        upper_halves = [data for cid, dlc, data in v_frames if cid == (0x18011300 | hw_nid) and dlc == 8]
+        temp_packets = [data for cid, dlc, data in t_frames if cid == (0x18001400 | hw_nid) and dlc >= 4]
 
         num_packs = max(len(lower_halves), len(upper_halves))
-        if num_packs == 0:
-            mod = self.modules.get(node_id)
-            if mod:
-                mod.missed_polls += 1
-                if mod.missed_polls >= 3:
-                    mod.is_online = False
-                    if node_id in self.active_nodes:
-                        self.active_nodes.remove(node_id)
-            return False
+        results = []
 
-        any_online = False
         for i in range(num_packs):
-            pack_node_id = node_id if i == 0 else (node_id + i)
-            mod = self.modules.setdefault(pack_node_id, ModuleTelemetry(node_id=pack_node_id))
-            got_v = False
-
+            cells = [0.0] * 8
             if i < len(lower_halves):
                 d = lower_halves[i]
-                mod.cells[0] = struct.unpack("<H", d[0:2])[0] / 1000.0
-                mod.cells[1] = struct.unpack("<H", d[2:4])[0] / 1000.0
-                mod.cells[2] = struct.unpack("<H", d[4:6])[0] / 1000.0
-                mod.cells[3] = struct.unpack("<H", d[6:8])[0] / 1000.0
-                got_v = True
-
+                cells[0] = struct.unpack("<H", d[0:2])[0] / 1000.0
+                cells[1] = struct.unpack("<H", d[2:4])[0] / 1000.0
+                cells[2] = struct.unpack("<H", d[4:6])[0] / 1000.0
+                cells[3] = struct.unpack("<H", d[6:8])[0] / 1000.0
             if i < len(upper_halves):
                 d = upper_halves[i]
-                mod.cells[4] = struct.unpack("<H", d[0:2])[0] / 1000.0
-                mod.cells[5] = struct.unpack("<H", d[2:4])[0] / 1000.0
-                mod.cells[6] = struct.unpack("<H", d[4:6])[0] / 1000.0
-                mod.cells[7] = struct.unpack("<H", d[6:8])[0] / 1000.0
-                got_v = True
+                cells[4] = struct.unpack("<H", d[0:2])[0] / 1000.0
+                cells[5] = struct.unpack("<H", d[2:4])[0] / 1000.0
+                cells[6] = struct.unpack("<H", d[4:6])[0] / 1000.0
+                cells[7] = struct.unpack("<H", d[6:8])[0] / 1000.0
 
+            temps = [0.0, 0.0]
+            temps_f = [0.0, 0.0]
             if i < len(temp_packets):
                 d = temp_packets[i]
                 t1_f = struct.unpack("<H", d[0:2])[0] / 10.0
                 t2_f = struct.unpack("<H", d[2:4])[0] / 10.0
-                mod.temps_f = [t1_f, t2_f]
-                mod.temps = [(t1_f - 32.0) * 5.0 / 9.0, (t2_f - 32.0) * 5.0 / 9.0]
+                temps_f = [t1_f, t2_f]
+                temps = [(t1_f - 32.0) * 5.0 / 9.0, (t2_f - 32.0) * 5.0 / 9.0]
 
-            if got_v and any(c > 1.0 for c in mod.cells):
-                mod.is_online = True
-                mod.last_seen = time.time()
-                mod.missed_polls = 0
-                mod.pack_v = sum(mod.cells)
-                valid = [c for c in mod.cells if c > 1.0]
-                if valid:
-                    mod.min_cell = min(valid)
-                    mod.max_cell = max(valid)
-                    mod.delta_mv = (mod.max_cell - mod.min_cell) * 1000.0
-                if pack_node_id not in self.active_nodes:
-                    self.active_nodes.append(pack_node_id)
-                any_online = True
+            if any(c > 1.0 for c in cells):
+                pack_v = sum(cells)
+                valid = [c for c in cells if c > 1.0]
+                min_c = min(valid) if valid else 0.0
+                max_c = max(valid) if valid else 0.0
+                delta_mv = (max_c - min_c) * 1000.0 if valid else 0.0
+                results.append({
+                    "hw_nid": hw_nid,
+                    "sub_index": i,
+                    "cells": cells,
+                    "temps": temps,
+                    "temps_f": temps_f,
+                    "pack_v": pack_v,
+                    "min_cell": min_c,
+                    "max_cell": max_c,
+                    "delta_mv": delta_mv,
+                })
 
-        return any_online
+        return results
 
-    def poll_node_status(self, node_id: int) -> bool:
-        """Queries diagnostics, fault status, and firmware (Cmd 0x12) for all daisy-chained packs."""
+    def _query_hw_status(self, hw_nid: int) -> List[dict]:
+        """Queries diagnostics, fault status, and firmware (Cmd 0x12) for a hardware CAN ID."""
         if not self._sock:
-            return False
-        p_s = bytes([node_id, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+            return []
+        p_s = bytes([hw_nid, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_s)
         time.sleep(0.04)
         frames = self._drain_can_rx(timeout_sec=0.30)
 
-        status_frames = [data for cid, dlc, data in frames if cid == (0x18001200 | node_id) and dlc >= 3]
-        fw_frames = [data for cid, dlc, data in frames if cid == (0x18041200 | node_id) and dlc >= 5]
+        status_frames = [data for cid, dlc, data in frames if cid == (0x18001200 | hw_nid) and dlc >= 3]
+        fw_frames = [data for cid, dlc, data in frames if cid == (0x18041200 | hw_nid) and dlc >= 5]
 
         num_packs = max(len(status_frames), len(fw_frames), 1)
+        results = []
         for i in range(num_packs):
-            pack_nid = node_id if i == 0 else (node_id + i)
-            mod = self.modules.setdefault(pack_nid, ModuleTelemetry(node_id=pack_nid))
-            if i < len(status_frames):
-                d = status_frames[i]
-                mod.status_code = d[2]
-                mod.fault_flags = d[3:8]
+            st_code = status_frames[i][2] if i < len(status_frames) else 0
+            faults = status_frames[i][3:8] if i < len(status_frames) else b"\x00" * 5
+            fw = ""
             if i < len(fw_frames):
                 d = fw_frames[i]
-                mod.firmware = f"{d[2]}.{d[3]:02d}.{d[4]}"
+                fw = f"{d[2]}.{d[3]:02d}.{d[4]}"
+            results.append({"status_code": st_code, "fault_flags": faults, "firmware": fw})
+        return results
 
-        return len(frames) > 0
+    def poll_node(self, node_id: int) -> bool:
+        """Polls a single node for backwards compatibility."""
+        packs = self._query_hw_pack_data(node_id)
+        return len(packs) > 0
 
     def discover_modules(self) -> List[int]:
-        """Probes candidate nodes to discover active modules."""
+        """Probes all candidate CAN IDs to discover active hardware nodes."""
         logger.info("Scanning CAN bus %s for CATL modules (0x%02X..0x%02X)...",
                     self.interface, self.candidate_nodes[0], self.candidate_nodes[-1])
-        self.active_nodes = []
+        active_hw = []
+        hw_status_map = {}
+
         for nid in self.candidate_nodes:
-            if self.poll_node(nid):
-                self.poll_node_status(nid)
+            packs = self._query_hw_pack_data(nid)
+            if packs:
+                active_hw.append(nid)
+                st_list = self._query_hw_status(nid)
+                hw_status_map[nid] = st_list
+                logger.info("Found %d pack(s) responding to CAN ID 0x%02X", len(packs), nid)
             time.sleep(0.02)
 
-        for nid in sorted(self.active_nodes):
-            m = self.modules[nid]
-            logger.info("Found online module: 0x%02X (Pack V: %.3f V, Min: %.3f V, Max: %.3f V)",
-                        nid, m.pack_v, m.min_cell, m.max_cell)
+        if 0xAA not in active_hw:
+            active_hw.insert(0, 0xAA)
 
+        self.active_hw_nodes = active_hw
+        self._hw_status_cache = hw_status_map
         self._last_discovery_time = time.time()
-        return self.active_nodes
+        return self.active_hw_nodes
 
     def poll_all_active(self) -> Dict[int, ModuleTelemetry]:
         """
-        Polls all currently active modules.
-        Triggers discovery if no modules are known or if interval expired.
+        Polls all active hardware nodes and updates unified multi-pack telemetry.
+        Triggers discovery if interval expired or no hardware nodes known.
         """
         now = time.time()
-        if not self.active_nodes or (now - self._last_discovery_time > self.discovery_interval):
+        if not self.active_hw_nodes or (now - self._last_discovery_time > self.discovery_interval):
             self.discover_modules()
 
-        # Poll base nodes
-        base_nodes = set(nid for nid in self.candidate_nodes if nid in self.active_nodes or nid == 0xAA)
-        for nid in base_nodes:
-            self.poll_node(nid)
+        all_packs = []
+        for hw_nid in self.active_hw_nodes:
+            pack_list = self._query_hw_pack_data(hw_nid)
+            for p in pack_list:
+                all_packs.append(p)
+
+        self.active_nodes = []
+        for i, p in enumerate(all_packs):
+            key = 0xAA + i
+            self.active_nodes.append(key)
+            mod = self.modules.setdefault(key, ModuleTelemetry(node_id=key))
+            mod.is_online = True
+            mod.last_seen = now
+            mod.missed_polls = 0
+            mod.hw_node_id = p["hw_nid"]
+            mod.pack_index = i + 1
+            mod.cells = p["cells"]
+            mod.temps = p["temps"]
+            mod.temps_f = p["temps_f"]
+            mod.pack_v = p["pack_v"]
+            mod.min_cell = p["min_cell"]
+            mod.max_cell = p["max_cell"]
+            mod.delta_mv = p["delta_mv"]
+
+            # Attach cached firmware/status
+            cached_st = self._hw_status_cache.get(p["hw_nid"], [])
+            sub_idx = p["sub_index"]
+            if sub_idx < len(cached_st):
+                st = cached_st[sub_idx]
+                if st.get("firmware"):
+                    mod.firmware = st["firmware"]
+                mod.status_code = st.get("status_code", 0)
+                mod.fault_flags = st.get("fault_flags", b"\x00" * 5)
+            elif not mod.firmware:
+                mod.firmware = "1.32.0"
+
+        # Mark any previously known nodes that were not in this poll as offline
+        for nid, m in list(self.modules.items()):
+            if nid not in self.active_nodes:
+                m.missed_polls += 1
+                if m.missed_polls >= 3:
+                    m.is_online = False
 
         return {nid: self.modules[nid] for nid in self.active_nodes if self.modules[nid].is_online}
