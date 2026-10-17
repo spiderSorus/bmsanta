@@ -165,9 +165,9 @@ class BMSantaService:
 
 
 def main():
-    can_iface = os.environ.get("BMSANTA_CAN_IFACE", "can0")
+    can_iface = os.environ.get("BMSANTA_CAN_IFACE", "can1")
     rs485_dev = os.environ.get("BMSANTA_RS485_DEV", "/dev/ttyUSB0")
-    inverter_can = os.environ.get("BMSANTA_INVERTER_CAN", "can1")
+    inverter_can = os.environ.get("BMSANTA_INVERTER_CAN", "can0")
     web_port = int(os.environ.get("BMSANTA_WEB_PORT", "5000"))
 
     service = BMSantaService(
