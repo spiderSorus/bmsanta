@@ -45,7 +45,7 @@ class BatteryBus:
 
     def __init__(self, interface: str = "can1", candidate_nodes: Optional[List[int]] = None):
         self.interface = interface
-        self.candidate_nodes = candidate_nodes or [0xAA + i for i in range(8)]  # 0xAA to 0xB1
+        self.candidate_nodes = candidate_nodes or [0xAA + i for i in range(16)]  # 0xAA to 0xB9 (up to 16 packs)
         self.modules: Dict[int, ModuleTelemetry] = {}
         self.active_nodes: List[int] = []
         self._sock: Optional[socket.socket] = None
@@ -103,7 +103,7 @@ class BatteryBus:
             logger.error("CAN send failed: %s", e)
             return False
 
-    def _drain_can_rx(self, timeout_sec: float = 0.12) -> List[tuple]:
+    def _drain_can_rx(self, timeout_sec: float = 0.20) -> List[tuple]:
         """Reads all pending CAN messages until silence or timeout."""
         frames = []
         if not self._sock:
@@ -131,7 +131,7 @@ class BatteryBus:
     def poll_node(self, node_id: int) -> bool:
         """
         Polls for Cell Voltages (0x13) and Temperatures (0x14).
-        Seamlessly supports multiple daisy-chained packs answering to the same node ID.
+        Seamlessly supports up to 8+ daisy-chained packs answering to node ID.
         """
         if not self._sock:
             return False
@@ -140,13 +140,13 @@ class BatteryBus:
         p_v = bytes([node_id, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_v)
         time.sleep(0.03)
-        v_frames = self._drain_can_rx(timeout_sec=0.15)
+        v_frames = self._drain_can_rx(timeout_sec=0.25)
 
         # --- 2. Query Temperatures (Cmd 0x14) ---
         p_t = bytes([node_id, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_t)
         time.sleep(0.03)
-        t_frames = self._drain_can_rx(timeout_sec=0.12)
+        t_frames = self._drain_can_rx(timeout_sec=0.15)
 
         # Collect all response frames for this query
         lower_halves = [data for cid, dlc, data in v_frames if cid == (0x18001300 | node_id) and dlc == 8]
@@ -210,21 +210,29 @@ class BatteryBus:
         return any_online
 
     def poll_node_status(self, node_id: int) -> bool:
-        """Queries diagnostics and fault status (Cmd 0x12)."""
+        """Queries diagnostics, fault status, and firmware (Cmd 0x12) for all daisy-chained packs."""
         if not self._sock:
             return False
         p_s = bytes([node_id, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_s)
-        time.sleep(0.03)
-        frames = self._drain_can_rx(timeout_sec=0.12)
+        time.sleep(0.04)
+        frames = self._drain_can_rx(timeout_sec=0.30)
 
-        mod = self.modules.setdefault(node_id, ModuleTelemetry(node_id=node_id))
-        for cid, dlc, data in frames:
-            if cid == (0x18001200 | node_id) and dlc >= 3:
-                mod.status_code = data[2]
-                mod.fault_flags = data[3:8]
-            elif cid == (0x18041200 | node_id) and dlc >= 5:
-                mod.firmware = f"{data[2]}.{data[3]:02d}.{data[4]}"
+        status_frames = [data for cid, dlc, data in frames if cid == (0x18001200 | node_id) and dlc >= 3]
+        fw_frames = [data for cid, dlc, data in frames if cid == (0x18041200 | node_id) and dlc >= 5]
+
+        num_packs = max(len(status_frames), len(fw_frames), 1)
+        for i in range(num_packs):
+            pack_nid = node_id if i == 0 else (node_id + i)
+            mod = self.modules.setdefault(pack_nid, ModuleTelemetry(node_id=pack_nid))
+            if i < len(status_frames):
+                d = status_frames[i]
+                mod.status_code = d[2]
+                mod.fault_flags = d[3:8]
+            if i < len(fw_frames):
+                d = fw_frames[i]
+                mod.firmware = f"{d[2]}.{d[3]:02d}.{d[4]}"
+
         return len(frames) > 0
 
     def discover_modules(self) -> List[int]:

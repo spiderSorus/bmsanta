@@ -161,19 +161,27 @@ def main():
                 "╠═════════════════════════════════════════════════════════════════╣",
             ]
 
-            for nid, m_info in modules.items():
-                nid_int = int(nid) if isinstance(nid, (int, str)) and not str(nid).startswith("0x") else nid
+            sorted_mods = sorted(modules.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else str(x[0]))
+            for idx, (nid, m_info) in enumerate(sorted_mods, 1):
+                nid_int = int(nid) if isinstance(nid, (int, str)) and str(nid).isdigit() else nid
                 nid_display = f"0x{int(nid_int):02X}" if isinstance(nid_int, int) else str(nid)
-                lines.append(f"║ Module {nid_display} (Pack V: {m_info.get('pack_v', 0):6.3f} V):                                 ║")
+                pack_num = m_info.get("pack_num", idx)
+                pack_v_mod = m_info.get("pack_v", 0.0)
+                delta_mod = m_info.get("delta_mv", 0.0)
+                t_list = m_info.get("temps_c", [0.0, 0.0])
+                t_str = f"{t_list[0]:.1f}°C, {t_list[1]:.1f}°C" if len(t_list) >= 2 else "--"
+                lines.append(f"╟─────────────────────────────────────────────────────────────────╢")
+                lines.append(f"║ [Pack #{pack_num} - {nid_display}] V: {pack_v_mod:6.3f} V | Δ: {delta_mod:4.1f} mV | Temps: {t_str:<15} ║")
+
                 cells_list = m_info.get("cells", [])
-                for i, v in enumerate(cells_list, 1):
-                    bar = make_bar(v, v_min=3.0, v_max=3.45, width=20)
-                    flag = " [MIN]" if v == min_v else (" [MAX]" if v == max_v else "      ")
-                    lines.append(f"║  Cell {i}: {v:5.3f} V |{bar}|{flag}         ║")
+                c_str1 = " ".join([f"C{i}:{v:.3f}{'*' if abs(v-min_v)<0.001 else ('^' if abs(v-max_v)<0.001 else ' ')}" for i, v in enumerate(cells_list[:4], 1)])
+                c_str2 = " ".join([f"C{i}:{v:.3f}{'*' if abs(v-min_v)<0.001 else ('^' if abs(v-max_v)<0.001 else ' ')}" for i, v in enumerate(cells_list[4:8], 5)])
+                lines.append(f"║   {c_str1:<60}║")
+                lines.append(f"║   {c_str2:<60}║")
 
             lines.extend([
                 "╚═════════════════════════════════════════════════════════════════╝",
-                f" Updated: {time.strftime('%Y-%m-%d %H:%M:%S')} | Press Ctrl+C to exit"
+                f" (* = Global Min, ^ = Global Max) | Updated: {time.strftime('%H:%M:%S')} | Ctrl+C"
             ])
 
             print("\n".join(lines))

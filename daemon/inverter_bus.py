@@ -161,8 +161,10 @@ class InverterSerialGateway:
 
             cur_hex = "0000"  # 0.1A signed
             pack_v_hex = f"{int(st.bank_voltage * 1000):04X}"
-            rem_ah_hex = f"{int(st.total_capacity_ah * (st.soc_pct / 100.0) * 100):04X}"
-            tot_ah_hex = f"{int(st.total_capacity_ah * 100):04X}"
+            rem_val = min(0xFFFF, max(0, int(st.total_capacity_ah * (st.soc_pct / 100.0) * 100)))
+            tot_val = min(0xFFFF, max(0, int(st.total_capacity_ah * 100)))
+            rem_ah_hex = f"{rem_val:04X}"
+            tot_ah_hex = f"{tot_val:04X}"
             cycles_hex = "000A"
 
             info = f"{info_flag}{pack_idx}08{cell_hex}02{temp_hex}{cur_hex}{pack_v_hex}{rem_ah_hex}{tot_ah_hex}{cycles_hex}"

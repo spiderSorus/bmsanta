@@ -112,15 +112,21 @@ class Aggregator:
                 if c > 1.0:
                     all_cells.append((c, m.node_id, idx))
 
+            pack_idx = (m.node_id - 0xAA) + 1 if m.node_id >= 0xAA else m.node_id
             mod_details[m.node_id] = {
+                "pack_num": pack_idx,
+                "node_hex": f"0x{m.node_id:02X}",
                 "pack_v": round(m.pack_v, 3),
                 "cells": [round(c, 3) for c in m.cells],
                 "temps_c": [round(t, 1) for t in m.temps],
+                "temps_f": [round((t * 9.0 / 5.0) + 32.0, 1) for t in m.temps],
                 "min_cell": round(m.min_cell, 3),
                 "max_cell": round(m.max_cell, 3),
                 "delta_mv": round(m.delta_mv, 1),
+                "status_code": m.status_code,
                 "firmware": m.firmware,
                 "last_seen": round(m.last_seen, 2),
+                "is_online": m.is_online,
             }
 
         avg_pack_v = sum(pack_voltages) / len(pack_voltages)
