@@ -103,6 +103,13 @@ class BatteryBus:
             frame = struct.pack("=IB3x8s", can_id | CAN_EFF, len(payload), padded_payload)
             self._sock.send(frame)
             return True
+        except OSError as e:
+            if getattr(e, 'errno', None) == 105:
+                # No buffer space available: CAN bus has no ACKs (batteries disconnected or unpowered)
+                logger.debug("CAN TX buffer full (waiting for battery ACK on %s)", self.interface)
+            else:
+                logger.error("CAN send failed on %s: %s", self.interface, e)
+            return False
         except Exception as e:
             logger.error("CAN send failed: %s", e)
             return False
