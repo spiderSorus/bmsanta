@@ -564,13 +564,16 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         const tempF = ((data.avg_temp_c || 22.5) * 9 / 5 + 32).toFixed(1);
         document.getElementById('temp-f-sub').textContent = `${tempF} °F • Range: ${(data.min_temp_c||0).toFixed(1)}° to ${(data.max_temp_c||0).toFixed(1)}°C`;
 
-        const onlineCount = data.online_modules || 1;
-        document.getElementById('capacity-sub').textContent = `${(data.total_capacity_ah || 100).toFixed(1)} Ah (${(data.total_energy_kwh || 2.56).toFixed(2)} kWh Usable)`;
+        const onlineCount = (data.online_modules !== undefined) ? data.online_modules : 0;
+        document.getElementById('capacity-sub').textContent = `${(data.total_capacity_ah || (onlineCount * 100)).toFixed(1)} Ah (${(data.total_energy_kwh || (onlineCount * 2.56)).toFixed(2)} kWh Usable)`;
         document.getElementById('min-max-sub').textContent = `Min: ${(data.min_cell_v||0).toFixed(3)}V (${data.min_cell_location||''}) | Max: ${(data.max_cell_v||0).toFixed(3)}V`;
 
         // 2. Health & Count Badges
         const healthBadge = document.getElementById('health-badge');
-        if (data.safety && data.safety.is_healthy) {
+        if (onlineCount === 0) {
+          healthBadge.innerHTML = '<span class="pulse-dot" style="background:#ef4444; box-shadow:0 0 8px #ef4444;"></span> NO BATTERIES';
+          healthBadge.className = 'badge badge-danger';
+        } else if (data.safety && data.safety.is_healthy) {
           healthBadge.innerHTML = '<span class="pulse-dot"></span> ONLINE (HEALTHY)';
           healthBadge.className = 'badge badge-success';
         } else {
@@ -707,24 +710,32 @@ HTML_DASHBOARD = """<!DOCTYPE html>
           `;
         });
 
-        modulesContainer.innerHTML = packsHtml;
-
-        // 5. Standby expansion slots for up to 8 packs
         const standbyContainer = document.getElementById('standby-container');
-        if (onlineCount < 8) {
-          const remaining = 8 - onlineCount;
-          standbyContainer.innerHTML = `
-            <div class="standby-card">
-              <div class="standby-title">⚡ Daisy-Chain Expansion Slots Available (${remaining} of 8 remaining)</div>
-              <div class="standby-desc">
-                BMSanta is configured for up to 8 daisy-chained CATL modules on single-bus CAN1.
-                As you daisy-chain Modules #3 through #8 onto the wiring harness, they will be auto-detected,
-                monitored, and dynamically aggregated into the bank live.
-              </div>
+        if (onlineCount === 0) {
+          modulesContainer.innerHTML = `
+            <div style="background:#1e293b; border:1px solid #ef4444; border-radius:12px; padding:24px; text-align:center; color:#f87171; margin-bottom:16px;">
+              <h3 style="margin-bottom:8px; font-size:1.1rem; font-weight:700;">⚠️ No Battery Modules Detected on CAN Bus</h3>
+              <p style="color:#94a3b8; font-size:0.85rem; margin-top:4px;">
+                Waiting for CATL LBM025100A telemetry. Check that the 24V auxiliary power supply is ON and CAN wiring (Yellow CAN_H / Green CAN_L) is connected to terminal block CAN0.
+              </p>
             </div>
           `;
-        } else {
           standbyContainer.innerHTML = '';
+        } else {
+          modulesContainer.innerHTML = packsHtml;
+          if (onlineCount < 8) {
+            const remaining = 8 - onlineCount;
+            standbyContainer.innerHTML = `
+              <div class="standby-card">
+                <div class="standby-title">⚡ Daisy-Chain Expansion Slots Available (${remaining} of 8 remaining)</div>
+                <div class="standby-desc">
+                  BMSanta is actively aggregating ${onlineCount} connected pack${onlineCount > 1 ? 's' : ''}. Up to 8 daisy-chained CATL modules are supported on single-bus CAN1.
+                </div>
+              </div>
+            `;
+          } else {
+            standbyContainer.innerHTML = '';
+          }
         }
 
         document.getElementById('last-update').textContent = new Date().toLocaleTimeString();

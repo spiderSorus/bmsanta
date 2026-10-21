@@ -151,6 +151,7 @@ class Aggregator:
 
         min_temp = min(all_temps) if all_temps else 25.0
         max_temp = max(all_temps) if all_temps else 25.0
+        avg_temp = sum(all_temps) / len(all_temps) if all_temps else 25.0
         raw_soc = estimate_soc_lfp(avg_pack_v)
 
         # Smooth SOC with Exponential Moving Average (EMA)
