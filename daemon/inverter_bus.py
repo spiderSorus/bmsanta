@@ -235,12 +235,53 @@ class InverterSerialGateway:
             13: st.online_modules,
         }
 
+    def _build_pylontech_broadcast(self) -> bytes:
+        """Constructs proactive Pylontech broadcast frames (CID2=47 and CID2=42) to keep charger alive."""
+        st = self.latest_state
+        if not st or st.online_modules == 0:
+            return b""
+        # 1. CID2=47: Charge & Discharge Management (Absorption 28.4V, CCL 200A, DCL 400A, Cutoff 21.0V)
+        cvl_mv = 28400
+        ccl_da = int(st.safety.ccl_amps * 10)
+        dcl_da = int(st.safety.dcl_amps * 10)
+        cutoff_mv = 21000
+        status_flags = 0xC0 if (st.safety.charge_enabled and st.safety.discharge_enabled) else 0x00
+        info_47 = f"{cvl_mv:04X}{ccl_da:04X}{dcl_da:04X}{cutoff_mv:04X}{status_flags:02X}"
+        body_47 = f"20014600{build_pylon_length(len(info_47))}{info_47}"
+        f_47 = f"~{body_47}{calculate_pylon_chksum(body_47)}\r".encode("ascii")
+
+        # 2. CID2=42: Analog Telemetry (Pack V, Current, SOC, Cell voltages, Temps)
+        mod_data = next(iter(st.module_details.values()), None) if st.module_details else None
+        cells = mod_data["cells"] if mod_data else [3.28] * 8
+        cell_hex = "".join(f"{int(c * 1000):04X}" for c in cells[:8])
+        temps = mod_data["temps_c"] if mod_data else [st.avg_temp_c, st.avg_temp_c]
+        temp_hex = "".join(f"{int((t + 273.15) * 10):04X}" for t in temps[:2])
+        cur_hex = "0000"
+        pack_v_hex = f"{int(st.bank_voltage * 1000):04X}"
+        rem_val = min(0xFFFF, max(0, int(st.total_capacity_ah * (st.soc_pct / 100.0) * 100)))
+        tot_val = min(0xFFFF, max(0, int(st.total_capacity_ah * 100)))
+        info_42 = f"010108{cell_hex}02{temp_hex}{cur_hex}{pack_v_hex}{rem_val:04X}{tot_val:04X}000A"
+        body_42 = f"20014600{build_pylon_length(len(info_42))}{info_42}"
+        f_42 = f"~{body_42}{calculate_pylon_chksum(body_42)}\r".encode("ascii")
+
+        return f_47 + f_42
+
     def _run_loop(self):
         buf = bytearray()
+        last_bcast = 0.0
         while self._running and self._serial:
             try:
+                now = time.time()
+                # Proactively broadcast telemetry every 1.0s to ensure the inverter receives continuous keep-alive
+                if now - last_bcast >= 1.0:
+                    bcast = self._build_pylontech_broadcast()
+                    if bcast:
+                        self._serial.write(bcast)
+                    last_bcast = now
+
                 data = self._serial.read(64)
                 if data:
+                    logger.info("RS-485 RX [%d bytes]: %s", len(data), data[:32])
                     buf.extend(data)
 
                 # --- 1. Check for Pylontech ASCII Frame (starts with '~' / 0x7E) ---
