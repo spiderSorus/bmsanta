@@ -5,9 +5,11 @@ Provides an offline, dark-mode real-time telemetry dashboard on port 5000.
 Optimized for multi-pack daisy chains (up to 8+ CATL LBM025100A 8S modules).
 """
 
+import time
 import json
 import logging
 import threading
+from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Callable
 
@@ -391,6 +393,138 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     .gw-key { color: var(--text-muted); font-size: 0.85rem; }
     .gw-val { font-weight: 600; font-size: 0.85rem; }
 
+    /* Running Charge State Chart */
+    .chart-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+    }
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .chart-title-area h2 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #f8fafc;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .chart-title-area p {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .chart-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .chart-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+    .chart-btn.active {
+      background: rgba(56, 189, 248, 0.12);
+      border-color: rgba(56, 189, 248, 0.4);
+      color: #7dd3fc;
+    }
+    .chart-btn.active.volts-btn {
+      background: rgba(251, 191, 36, 0.12);
+      border-color: rgba(251, 191, 36, 0.4);
+      color: #fde68a;
+    }
+    .chart-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .range-selector {
+      display: inline-flex;
+      background: #0f1523;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .range-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .range-btn.active {
+      background: #2563eb;
+      color: #ffffff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    .range-btn:hover:not(.active) {
+      color: var(--text);
+    }
+    .chart-canvas-wrap {
+      position: relative;
+      width: 100%;
+      height: 220px;
+      background: #0a0e17;
+      border-radius: 8px;
+      border: 1px solid #1e293b;
+      overflow: hidden;
+    }
+    .chart-tooltip {
+      position: absolute;
+      display: none;
+      pointer-events: none;
+      background: rgba(15, 21, 35, 0.95);
+      border: 1px solid #38bdf8;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.75rem;
+      color: #f8fafc;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+      backdrop-filter: blur(4px);
+      z-index: 10;
+      line-height: 1.4;
+    }
+    .chart-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
     footer {
       text-align: center;
       margin-top: 32px;
@@ -454,6 +588,46 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         </div>
         <div class="card-val" id="temp-val">--.- °C</div>
         <div class="card-sub" id="temp-f-sub">--.- °F</div>
+      </div>
+    </div>
+
+    <!-- Running Charge State & Voltage Trend Chart (1-Minute Polling) -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title-area">
+          <h2>
+            <span>Running Charge State &amp; Voltage Trend</span>
+            <span class="badge badge-cyan" style="font-size:0.7rem; padding:2px 8px;"><span class="pulse-dot"></span> 1-MIN LIVE</span>
+          </h2>
+          <p>Historical State of Charge (SOC %) trajectory and bank voltage curve (1-minute polling)</p>
+        </div>
+        <div class="chart-controls">
+          <div style="display: flex; gap: 6px;">
+            <button id="toggle-soc" class="chart-btn active" title="Toggle SOC % Line">
+              <span class="legend-dot" style="background: #38bdf8;"></span> SOC %
+            </button>
+            <button id="toggle-volts" class="chart-btn active volts-btn" title="Toggle Bank Voltage Line">
+              <span class="legend-dot" style="background: #fbbf24;"></span> Voltage
+            </button>
+          </div>
+          <div class="range-selector">
+            <button class="range-btn" data-range="60" title="Last 1 Hour">1h</button>
+            <button class="range-btn active" data-range="180" title="Last 3 Hours">3h</button>
+            <button class="range-btn" data-range="360" title="Last 6 Hours">6h</button>
+            <button class="range-btn" data-range="720" title="Last 12 Hours">12h</button>
+            <button class="range-btn" data-range="1440" title="Last 24 Hours">24h</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-canvas-wrap">
+        <canvas id="charge-chart" style="width: 100%; height: 100%; display: block;"></canvas>
+        <div id="chart-tooltip" class="chart-tooltip"></div>
+      </div>
+
+      <div class="chart-footer">
+        <span id="chart-time-range">Showing last 3 hours (1-minute samples)</span>
+        <span id="chart-stats">Latest: --% | --.- V</span>
       </div>
     </div>
 
@@ -739,13 +913,353 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         }
 
         document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+        // Feed graph on live update if buffer is empty or minute has elapsed
+        if (data.online_modules > 0 && data.bank_voltage > 10.0) {
+          const tNow = Math.floor(data.timestamp || Date.now() / 1000);
+          if (graphData.length === 0 || (tNow - graphData[graphData.length - 1].t >= 50)) {
+            graphData.push({
+              t: tNow,
+              soc: data.soc_pct || 0,
+              v: data.bank_voltage || 0,
+              delta: data.delta_cell_mv || 0
+            });
+            if (graphData.length > 1440) graphData.shift();
+            drawChart();
+          }
+        }
       } catch (e) {
         console.error("Dashboard update error:", e);
       }
     }
 
+    // --- 1-Minute Polling Running Charge State Graph ---
+    let graphData = [];
+    let showSoc = true;
+    let showVolts = true;
+    let selectedRangeMinutes = 180; // Default 3 hours
+    let isHovering = false;
+    let hoverClientX = 0;
+    const canvas = document.getElementById('charge-chart');
+    const ctx = canvas ? canvas.getContext('2d') : null;
+    const tooltip = document.getElementById('chart-tooltip');
+
+    document.querySelectorAll('.range-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        selectedRangeMinutes = parseInt(e.target.getAttribute('data-range'));
+        drawChart();
+      });
+    });
+
+    const toggleSocBtn = document.getElementById('toggle-soc');
+    if (toggleSocBtn) {
+      toggleSocBtn.addEventListener('click', () => {
+        showSoc = !showSoc;
+        toggleSocBtn.classList.toggle('active', showSoc);
+        drawChart();
+      });
+    }
+
+    const toggleVoltsBtn = document.getElementById('toggle-volts');
+    if (toggleVoltsBtn) {
+      toggleVoltsBtn.addEventListener('click', () => {
+        showVolts = !showVolts;
+        toggleVoltsBtn.classList.toggle('active', showVolts);
+        drawChart();
+      });
+    }
+
+    function onPointerMove(e) {
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      hoverClientX = clientX - rect.left;
+      isHovering = true;
+      drawChart();
+    }
+
+    function onPointerLeave() {
+      isHovering = false;
+      if (tooltip) tooltip.style.display = 'none';
+      drawChart();
+    }
+
+    if (canvas) {
+      canvas.addEventListener('mousemove', onPointerMove);
+      canvas.addEventListener('mouseleave', onPointerLeave);
+      canvas.addEventListener('touchstart', onPointerMove, { passive: true });
+      canvas.addEventListener('touchmove', onPointerMove, { passive: true });
+      canvas.addEventListener('touchend', onPointerLeave);
+      window.addEventListener('resize', drawChart);
+    }
+
+    async function pollGraph() {
+      try {
+        const resp = await fetch('/api/history');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (Array.isArray(data) && data.length > 0) {
+          graphData = data;
+          drawChart();
+        }
+      } catch (err) {
+        console.warn("History poll error:", err);
+      }
+    }
+
+    function drawChart() {
+      if (!canvas || !ctx) return;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const W = rect.width;
+      const H = rect.height;
+      if (W === 0 || H === 0) return;
+
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+      }
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+
+      const padL = 46;
+      const padR = 56;
+      const padT = 16;
+      const padB = 26;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+
+      if (plotW <= 30 || plotH <= 30) {
+        ctx.restore();
+        return;
+      }
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const rangeSec = selectedRangeMinutes * 60;
+      const tEnd = graphData.length > 0 ? Math.max(nowSec, graphData[graphData.length - 1].t) : nowSec;
+      const tStart = tEnd - rangeSec;
+
+      const visiblePoints = graphData.filter(p => p.t >= (tStart - 60) && p.t <= (tEnd + 60));
+
+      const timeToX = (t) => padL + Math.max(0, Math.min(plotW, ((t - tStart) / rangeSec) * plotW));
+      const socToY = (s) => padT + plotH - (Math.max(0, Math.min(100, s)) / 100) * plotH;
+
+      let minV = Infinity, maxV = -Infinity;
+      visiblePoints.forEach(p => {
+        if (p.v > 10.0) {
+          if (p.v < minV) minV = p.v;
+          if (p.v > maxV) maxV = p.v;
+        }
+      });
+      if (!isFinite(minV)) { minV = 25.5; maxV = 27.0; }
+      const vSpan = Math.max(0.4, maxV - minV);
+      const vMid = (minV + maxV) / 2;
+      const vLow = Math.floor((vMid - vSpan * 0.6) * 10) / 10;
+      const vHigh = Math.ceil((vMid + vSpan * 0.6) * 10) / 10;
+      const vRange = Math.max(0.2, vHigh - vLow);
+      const voltToY = (v) => padT + plotH - ((v - vLow) / vRange) * plotH;
+
+      ctx.lineWidth = 1;
+      const gridLevels = [0.0, 0.25, 0.5, 0.75, 1.0];
+      gridLevels.forEach((ratio) => {
+        const y = padT + plotH * (1 - ratio);
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = '#1e293b';
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(padL + plotW, y);
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+        ctx.font = '10px ui-monospace, SFMono-Regular, monospace';
+        ctx.textBaseline = 'middle';
+
+        ctx.fillStyle = ratio === 1.0 || ratio === 0.0 ? '#38bdf8' : '#64748b';
+        ctx.textAlign = 'right';
+        ctx.fillText(Math.round(ratio * 100) + '%', padL - 8, y);
+
+        const vAtLevel = vLow + ratio * vRange;
+        ctx.fillStyle = ratio === 1.0 || ratio === 0.0 ? '#fbbf24' : '#64748b';
+        ctx.textAlign = 'left';
+        ctx.fillText(vAtLevel.toFixed(2) + 'V', padL + plotW + 8, y);
+      });
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#64748b';
+      const tickCount = Math.min(6, Math.max(3, Math.floor(plotW / 90)));
+      for (let i = 0; i <= tickCount; i++) {
+        const tTick = tStart + (i / tickCount) * rangeSec;
+        const xTick = padL + (i / tickCount) * plotW;
+        const d = new Date(tTick * 1000);
+        const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+        ctx.fillText(timeStr, xTick, padT + plotH + 7);
+      }
+
+      if (visiblePoints.length === 0) {
+        ctx.fillStyle = '#64748b';
+        ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Accumulating 1-minute charge telemetry...', padL + plotW / 2, padT + plotH / 2);
+        ctx.restore();
+        return;
+      }
+
+      if (showSoc && visiblePoints.length >= 1) {
+        if (visiblePoints.length >= 2) {
+          const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+          grad.addColorStop(0, 'rgba(56, 189, 248, 0.25)');
+          grad.addColorStop(1, 'rgba(56, 189, 248, 0.00)');
+          ctx.beginPath();
+          ctx.moveTo(timeToX(visiblePoints[0].t), padT + plotH);
+          visiblePoints.forEach(p => ctx.lineTo(timeToX(p.t), socToY(p.soc)));
+          ctx.lineTo(timeToX(visiblePoints[visiblePoints.length - 1].t), padT + plotH);
+          ctx.closePath();
+          ctx.fillStyle = grad;
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.setLineDash([]);
+          ctx.lineWidth = 2.2;
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineJoin = 'round';
+          visiblePoints.forEach((p, idx) => {
+            const x = timeToX(p.t);
+            const y = socToY(p.soc);
+            if (idx === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+
+        const lastP = visiblePoints[visiblePoints.length - 1];
+        const hx = timeToX(lastP.t);
+        const hy = socToY(lastP.soc);
+        ctx.beginPath();
+        ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#38bdf8';
+        ctx.shadowColor = '#38bdf8';
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+
+      if (showVolts && visiblePoints.length >= 1) {
+        if (visiblePoints.length >= 2) {
+          ctx.beginPath();
+          ctx.setLineDash([]);
+          ctx.lineWidth = 2.0;
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineJoin = 'round';
+          visiblePoints.forEach((p, idx) => {
+            const x = timeToX(p.t);
+            const y = voltToY(p.v);
+            if (idx === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+
+        const lastP = visiblePoints[visiblePoints.length - 1];
+        const vx = timeToX(lastP.t);
+        const vy = voltToY(lastP.v);
+        ctx.beginPath();
+        ctx.arc(vx, vy, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fbbf24';
+        ctx.shadowColor = '#fbbf24';
+        ctx.shadowBlur = 6;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+
+      if (isHovering && hoverClientX >= padL && hoverClientX <= padL + plotW && visiblePoints.length > 0) {
+        const hoverT = tStart + ((hoverClientX - padL) / plotW) * rangeSec;
+        let closest = visiblePoints[0];
+        let minDist = Math.abs(closest.t - hoverT);
+        for (let i = 1; i < visiblePoints.length; i++) {
+          const d = Math.abs(visiblePoints[i].t - hoverT);
+          if (d < minDist) {
+            minDist = d;
+            closest = visiblePoints[i];
+          }
+        }
+        const cx = timeToX(closest.t);
+
+        ctx.beginPath();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.moveTo(cx, padT);
+        ctx.lineTo(cx, padT + plotH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (showSoc) {
+          ctx.beginPath();
+          ctx.arc(cx, socToY(closest.soc), 5, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          ctx.fill();
+          ctx.stroke();
+        }
+        if (showVolts) {
+          ctx.beginPath();
+          ctx.arc(cx, voltToY(closest.v), 5, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 2;
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        if (tooltip) {
+          const tStr = new Date(closest.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+          tooltip.innerHTML = `
+            <div style="font-weight:700; color:#cbd5e1; margin-bottom:3px; font-size:0.75rem;">⏱ ${tStr} (1-min sample)</div>
+            <div style="color:#38bdf8; font-weight:600;">SOC: <b>${closest.soc.toFixed(1)}%</b></div>
+            <div style="color:#fbbf24; font-weight:600;">Voltage: <b>${closest.v.toFixed(3)} V</b></div>
+            <div style="color:#94a3b8; font-size:0.7rem; margin-top:2px;">Cell &Delta;V: <b>${(closest.delta || 0).toFixed(1)} mV</b></div>
+          `;
+          tooltip.style.display = 'block';
+          let tipX = cx + 12;
+          if (tipX + 160 > W) tipX = cx - 170;
+          tooltip.style.left = Math.max(8, tipX) + 'px';
+          tooltip.style.top = (padT + 10) + 'px';
+        }
+      }
+
+      const hours = (selectedRangeMinutes / 60).toFixed(selectedRangeMinutes % 60 === 0 ? 0 : 1);
+      document.getElementById('chart-time-range').textContent = `Showing last ${hours} hour${selectedRangeMinutes > 60 ? 's' : ''} (${visiblePoints.length} sample${visiblePoints.length !== 1 ? 's' : ''} @ 1 min)`;
+
+      if (visiblePoints.length > 0) {
+        const latest = visiblePoints[visiblePoints.length - 1];
+        const first = visiblePoints[0];
+        const socDelta = latest.soc - first.soc;
+        const socDeltaStr = (socDelta >= 0 ? '+' : '') + socDelta.toFixed(1) + '%';
+        const vDelta = latest.v - first.v;
+        const vDeltaStr = (vDelta >= 0 ? '+' : '') + vDelta.toFixed(3) + ' V';
+        document.getElementById('chart-stats').innerHTML = `
+          Latest: <b style="color:#38bdf8;">${latest.soc.toFixed(1)}%</b> (<span style="color:${socDelta>=0?'#34d399':'#f87171'}">${socDeltaStr}</span>) | 
+          <b style="color:#fbbf24;">${latest.v.toFixed(3)} V</b> (<span style="color:${vDelta>=0?'#34d399':'#f87171'}">${vDeltaStr}</span>)
+        `;
+      }
+
+      ctx.restore();
+    }
+
+    // 1 Hz real-time dashboard poll
     updateDashboard();
     setInterval(updateDashboard, 1000);
+
+    // Initial graph poll + 1-minute recurring polling
+    pollGraph();
+    setInterval(pollGraph, 60000);
   </script>
 </body>
 </html>
@@ -754,6 +1268,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 
 class DashboardHandler(BaseHTTPRequestHandler):
     get_state_fn: Optional[Callable] = None
+    history_buffer: deque = deque(maxlen=1440)  # 24 hours of 1-minute samples
 
     def log_message(self, format, *args):
         # Suppress routine GET logging to prevent spam
@@ -792,6 +1307,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+        elif self.path == "/api/history":
+            history_data = list(DashboardHandler.history_buffer)
+            content = json.dumps(history_data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
         elif self.path == "/api/health":
             content = b'{"status":"ok"}'
             self.send_response(200)
@@ -811,17 +1335,60 @@ class EmbeddedWebServer:
         DashboardHandler.get_state_fn = get_state_fn
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._sampler_thread: Optional[threading.Thread] = None
+        self._running = False
+
+    def _sample_history_point(self):
+        try:
+            state_data = {}
+            if DashboardHandler.get_state_fn:
+                state_data = DashboardHandler.get_state_fn()
+            else:
+                for p in ["/run/bmsanta_status.json", "/tmp/bmsanta_status.json"]:
+                    try:
+                        with open(p, "r") as f:
+                            state_data = json.load(f)
+                        break
+                    except Exception:
+                        pass
+            if state_data and state_data.get("online_modules", 0) > 0 and state_data.get("bank_voltage", 0) > 10.0:
+                t_now = int(state_data.get("timestamp") or time.time())
+                # Append sample if empty or at least 50 seconds since last sample
+                if not DashboardHandler.history_buffer or (t_now - DashboardHandler.history_buffer[-1]["t"] >= 50):
+                    DashboardHandler.history_buffer.append({
+                        "t": t_now,
+                        "soc": round(state_data.get("soc_pct", 0), 1),
+                        "v": round(state_data.get("bank_voltage", 0), 3),
+                        "delta": round(state_data.get("delta_cell_mv", 0), 1)
+                    })
+        except Exception as e:
+            logger.debug("History sampling error: %s", e)
+
+    def _history_sampler_loop(self):
+        # Immediate sample on start
+        self._sample_history_point()
+        while self._running:
+            for _ in range(60):
+                if not self._running:
+                    break
+                time.sleep(1)
+            if self._running:
+                self._sample_history_point()
 
     def start(self):
         try:
+            self._running = True
             self._server = HTTPServer((self.host, self.port), DashboardHandler)
             self._thread = threading.Thread(target=self._server.serve_forever, name="WebDashboardServer", daemon=True)
             self._thread.start()
-            logger.info("Embedded Web Dashboard running at http://%s:%d", self.host, self.port)
+            self._sampler_thread = threading.Thread(target=self._history_sampler_loop, name="HistorySampler60s", daemon=True)
+            self._sampler_thread.start()
+            logger.info("Embedded Web Dashboard running at http://%s:%d (1-min history sampler active)", self.host, self.port)
         except Exception as e:
             logger.error("Failed to start Web Dashboard on port %d: %s", self.port, e)
 
     def stop(self):
+        self._running = False
         if self._server:
             try:
                 self._server.shutdown()
