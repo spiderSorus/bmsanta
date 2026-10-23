@@ -47,7 +47,7 @@ class BatteryBus:
 
     def __init__(self, interface: str = "can1", candidate_nodes: Optional[List[int]] = None):
         self.interface = interface
-        self.candidate_nodes = candidate_nodes or [0xAA, 0xAB]
+        self.candidate_nodes = candidate_nodes or [0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1]
         self.active_hw_nodes: List[int] = [0xAA]  # physical query IDs returning responses
         self.modules: Dict[int, ModuleTelemetry] = {}
         self.active_nodes: List[int] = []
@@ -114,18 +114,20 @@ class BatteryBus:
             logger.error("CAN send failed: %s", e)
             return False
 
-    def _drain_can_rx(self, timeout_sec: float = 0.20) -> List[tuple]:
-        """Reads all pending CAN messages until silence or timeout."""
+    def _drain_can_rx(self, timeout_sec: float = 0.08, quiet_timeout: float = 0.015) -> List[tuple]:
+        """Reads pending CAN messages until quiet_timeout silence or overall timeout."""
         frames = []
         if not self._sock:
             return frames
 
         t_end = time.time() + timeout_sec
         while time.time() < t_end:
-            remaining = max(0.005, t_end - time.time())
-            r, _, _ = select.select([self._sock], [], [], remaining)
+            rem = min(quiet_timeout, max(0.002, t_end - time.time()))
+            r, _, _ = select.select([self._sock], [], [], rem)
             if not r:
-                break
+                if frames or time.time() >= t_end:
+                    break
+                continue
             try:
                 raw = self._sock.recv(16)
                 if len(raw) >= 16:
@@ -140,31 +142,24 @@ class BatteryBus:
         return frames
 
     def _query_hw_pack_data(self, hw_nid: int) -> List[dict]:
-        """Reads cell voltages (0x13) and temperatures (0x14), polling only if needed."""
+        """Reads cell voltages (0x13) and temperatures (0x14) by actively querying hw_nid."""
         if not self._sock:
             return []
 
-        # 1. First listen for autonomous broadcast frames
-        frames = self._drain_can_rx(timeout_sec=0.45)
-        lower_halves = [data for cid, dlc, data in frames if cid == (0x18001300 | hw_nid) and dlc == 8]
-        upper_halves = [data for cid, dlc, data in frames if cid == (0x18011300 | hw_nid) and dlc == 8]
-        temp_packets = [data for cid, dlc, data in frames if cid == (0x18001400 | hw_nid) and dlc >= 4]
+        # 1. Send voltage query (0x13)
+        p_v = bytes([hw_nid, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        self._send_can_frame(POLL_ID, p_v)
+        v_frames = self._drain_can_rx(timeout_sec=0.06, quiet_timeout=0.015)
 
-        # 2. If no frames were broadcasting, actively poll the module
-        if not lower_halves:
-            p_v = bytes([hw_nid, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            self._send_can_frame(POLL_ID, p_v)
-            time.sleep(0.04)
-            v_frames = self._drain_can_rx(timeout_sec=0.25)
-            lower_halves += [data for cid, dlc, data in v_frames if cid == (0x18001300 | hw_nid) and dlc == 8]
-            upper_halves += [data for cid, dlc, data in v_frames if cid == (0x18011300 | hw_nid) and dlc == 8]
+        # 2. Send temperature query (0x14)
+        p_t = bytes([hw_nid, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        self._send_can_frame(POLL_ID, p_t)
+        t_frames = self._drain_can_rx(timeout_sec=0.05, quiet_timeout=0.015)
 
-        if not temp_packets:
-            p_t = bytes([hw_nid, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            self._send_can_frame(POLL_ID, p_t)
-            time.sleep(0.04)
-            t_frames = self._drain_can_rx(timeout_sec=0.15)
-            temp_packets += [data for cid, dlc, data in t_frames if cid == (0x18001400 | hw_nid) and dlc >= 4]
+        all_rx = v_frames + t_frames
+        lower_halves = [data for cid, dlc, data in all_rx if cid == (0x18001300 | hw_nid) and dlc == 8]
+        upper_halves = [data for cid, dlc, data in all_rx if cid == (0x18011300 | hw_nid) and dlc == 8]
+        temp_packets = [data for cid, dlc, data in all_rx if cid == (0x18001400 | hw_nid) and dlc >= 4]
 
         # Only pair complete cell halves (cells 1-4 and cells 5-8), capped to 8 packs max
         num_packs = min(len(lower_halves), len(upper_halves), 8)
@@ -220,8 +215,7 @@ class BatteryBus:
             return []
         p_s = bytes([hw_nid, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         self._send_can_frame(POLL_ID, p_s)
-        time.sleep(0.04)
-        frames = self._drain_can_rx(timeout_sec=0.30)
+        frames = self._drain_can_rx(timeout_sec=0.10, quiet_timeout=0.015)
 
         status_frames = [data for cid, dlc, data in frames if cid == (0x18001200 | hw_nid) and dlc >= 3]
         fw_frames = [data for cid, dlc, data in frames if cid == (0x18041200 | hw_nid) and dlc >= 5]
@@ -251,16 +245,17 @@ class BatteryBus:
         hw_status_map = {}
 
         for nid in self.candidate_nodes:
+            self._drain_can_rx(timeout_sec=0.01)  # flush buffer before probe
             packs = self._query_hw_pack_data(nid)
             if packs:
                 active_hw.append(nid)
                 st_list = self._query_hw_status(nid)
                 hw_status_map[nid] = st_list
                 logger.info("Found %d pack(s) responding to CAN ID 0x%02X", len(packs), nid)
-            time.sleep(0.02)
+            time.sleep(0.01)
 
-        if 0xAA not in active_hw:
-            active_hw.insert(0, 0xAA)
+        if 0xAA not in active_hw and not active_hw:
+            active_hw.append(0xAA)
 
         self.active_hw_nodes = active_hw
         self._hw_status_cache = hw_status_map
