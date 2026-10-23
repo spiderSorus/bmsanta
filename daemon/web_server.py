@@ -921,7 +921,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             graphData.push({
               t: tNow,
               soc: data.soc_pct || 0,
-              v: Math.round((data.bank_voltage || 0) * 10) / 10,
+              v: data.bank_voltage || 0,
               delta: data.delta_cell_mv || 0
             });
             if (graphData.length > 1440) graphData.shift();
@@ -1051,18 +1051,17 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       let minV = Infinity, maxV = -Infinity;
       visiblePoints.forEach(p => {
         if (p.v > 10.0) {
-          const vRound = Math.round(p.v * 10) / 10;
-          if (vRound < minV) minV = vRound;
-          if (vRound > maxV) maxV = vRound;
+          if (p.v < minV) minV = p.v;
+          if (p.v > maxV) maxV = p.v;
         }
       });
       if (!isFinite(minV)) { minV = 25.5; maxV = 27.0; }
-      const vSpan = Math.max(0.4, maxV - minV);
+      const vSpan = Math.max(0.2, maxV - minV);
       const vMid = (minV + maxV) / 2;
       const vLow = Math.floor((vMid - vSpan * 0.6) * 10) / 10;
       const vHigh = Math.ceil((vMid + vSpan * 0.6) * 10) / 10;
-      const vRange = Math.max(0.2, vHigh - vLow);
-      const voltToY = (v) => padT + plotH - (((Math.round(v * 10) / 10) - vLow) / vRange) * plotH;
+      const vRange = Math.max(0.1, vHigh - vLow);
+      const voltToY = (v) => padT + plotH - ((v - vLow) / vRange) * plotH;
 
       ctx.lineWidth = 1;
       const gridLevels = [0.0, 0.25, 0.5, 0.75, 1.0];
@@ -1084,11 +1083,11 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         ctx.textAlign = 'right';
         ctx.fillText(Math.round(ratio * 100) + '%', padL - 8, y);
 
-        // Right label: Voltage (nearest 10th volt)
-        const vAtLevel = Math.round((vLow + ratio * vRange) * 10) / 10;
+        // Right label: Voltage
+        const vAtLevel = vLow + ratio * vRange;
         ctx.fillStyle = ratio === 1.0 || ratio === 0.0 ? '#fbbf24' : '#64748b';
         ctx.textAlign = 'left';
-        ctx.fillText(vAtLevel.toFixed(1) + 'V', padL + plotW + 8, y);
+        ctx.fillText(vAtLevel.toFixed(2) + 'V', padL + plotW + 8, y);
       });
 
       ctx.textAlign = 'center';
@@ -1226,7 +1225,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
           tooltip.innerHTML = `
             <div style="font-weight:700; color:#cbd5e1; margin-bottom:3px; font-size:0.75rem;">⏱ ${tStr} (1-min sample)</div>
             <div style="color:#38bdf8; font-weight:600;">SOC: <b>${closest.soc.toFixed(1)}%</b></div>
-            <div style="color:#fbbf24; font-weight:600;">Voltage: <b>${closest.v.toFixed(1)} V</b></div>
+            <div style="color:#fbbf24; font-weight:600;">Voltage: <b>${closest.v.toFixed(3)} V</b></div>
             <div style="color:#94a3b8; font-size:0.7rem; margin-top:2px;">Cell &Delta;V: <b>${(closest.delta || 0).toFixed(1)} mV</b></div>
           `;
           tooltip.style.display = 'block';
@@ -1246,10 +1245,10 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         const socDelta = latest.soc - first.soc;
         const socDeltaStr = (socDelta >= 0 ? '+' : '') + socDelta.toFixed(1) + '%';
         const vDelta = latest.v - first.v;
-        const vDeltaStr = (vDelta >= 0 ? '+' : '') + vDelta.toFixed(1) + ' V';
+        const vDeltaStr = (vDelta >= 0 ? '+' : '') + vDelta.toFixed(3) + ' V';
         document.getElementById('chart-stats').innerHTML = `
           Latest: <b style="color:#38bdf8;">${latest.soc.toFixed(1)}%</b> (<span style="color:${socDelta>=0?'#34d399':'#f87171'}">${socDeltaStr}</span>) | 
-          <b style="color:#fbbf24;">${latest.v.toFixed(1)} V</b> (<span style="color:${vDelta>=0?'#34d399':'#f87171'}">${vDeltaStr}</span>)
+          <b style="color:#fbbf24;">${latest.v.toFixed(3)} V</b> (<span style="color:${vDelta>=0?'#34d399':'#f87171'}">${vDeltaStr}</span>)
         `;
       }
 
@@ -1361,7 +1360,7 @@ class EmbeddedWebServer:
                     DashboardHandler.history_buffer.append({
                         "t": t_now,
                         "soc": round(state_data.get("soc_pct", 0), 1),
-                        "v": round(state_data.get("bank_voltage", 0), 1),
+                        "v": round(state_data.get("bank_voltage", 0), 3),
                         "delta": round(state_data.get("delta_cell_mv", 0), 1)
                     })
         except Exception as e:
