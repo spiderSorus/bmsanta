@@ -545,6 +545,7 @@ python3-msgpack					install
 python3-netplan					install
 python3-oauthlib				install
 python3-packaging				install
+python3-pip					install
 python3-pip-whl					install
 python3-pycryptodome				install
 python3-pygments				install
@@ -567,6 +568,7 @@ python3-uritemplate				install
 python3-urllib3					install
 python3-venv					install
 python3-webcolors				install
+python3-wheel					install
 python3-wrapt					install
 python3-yaml					install
 python3.13					install
