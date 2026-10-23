@@ -20,7 +20,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BMSanta - 24V CATL Multi-Module ESS Monitor</title>
+  <title>🎅 BMSanta - 24V CATL Multi-Module ESS Monitor</title>
   <style>
     :root {
       --bg: #0b0f19;
@@ -537,7 +537,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
   <div class="container">
     <header>
       <div class="logo-area">
-        <div class="logo-badge">BMSanta</div>
+        <div class="logo-badge">🎅 BMSanta</div>
         <div class="title-area">
           <h1>CATL 24V Energy Storage System</h1>
           <p>Huasi BME 8S1P • Modbus RTU / Pylontech Gateway • 8-Module Daisy-Chain Bus</p>
@@ -696,7 +696,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     </div>
 
     <footer>
-      BMSanta Multi-Module ESS Controller • Polling at 1 Hz • Last Response: <span id="last-update">--:--:--</span>
+      🎅 BMSanta Multi-Module ESS Controller • Polling at 1 Hz • Last Response: <span id="last-update">--:--:--</span>
     </footer>
   </div>
 
