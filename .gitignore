@@ -16,3 +16,5 @@ venv/
 # Temporary data and logs
 *.log
 zero.tmp
+data/
+*.tmp

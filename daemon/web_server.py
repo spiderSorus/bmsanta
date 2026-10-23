@@ -5,6 +5,7 @@ Provides an offline, dark-mode real-time telemetry dashboard on port 5000.
 Optimized for multi-pack daisy chains (up to 8+ CATL LBM025100A 8S modules).
 """
 
+import os
 import time
 import json
 import logging
@@ -925,6 +926,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
               delta: data.delta_cell_mv || 0
             });
             if (graphData.length > 1440) graphData.shift();
+            try { localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-1440))); } catch (e) {}
             drawChart();
           }
         }
@@ -935,6 +937,13 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 
     // --- 1-Minute Polling Running Charge State Graph ---
     let graphData = [];
+    try {
+      const cached = localStorage.getItem('bmsanta_graph_history');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) graphData = parsed;
+      }
+    } catch (e) {}
     let showSoc = true;
     let showVolts = true;
     let selectedRangeMinutes = 180; // Default 3 hours
@@ -1002,6 +1011,9 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         const data = await resp.json();
         if (Array.isArray(data) && data.length > 0) {
           graphData = data;
+          try {
+            localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-1440)));
+          } catch (e) {}
           drawChart();
         }
       } catch (err) {
@@ -1268,9 +1280,65 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 """
 
 
+def get_history_file_path() -> str:
+    """Returns the persistent file path for chart history data."""
+    if "BMSANTA_HISTORY_FILE" in os.environ:
+        return os.environ["BMSANTA_HISTORY_FILE"]
+    try:
+        repo_data = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        os.makedirs(repo_data, exist_ok=True)
+        return os.path.join(repo_data, "history.json")
+    except Exception:
+        pass
+    home_dir = os.path.join(os.path.expanduser("~"), ".bmsanta")
+    try:
+        os.makedirs(home_dir, exist_ok=True)
+        return os.path.join(home_dir, "history.json")
+    except Exception:
+        pass
+    return "/tmp/bmsanta_history.json"
+
+
+def load_persistent_history(max_len: int = 1440) -> deque:
+    """Loads historical telemetry points from persistent disk storage into a deque."""
+    buf = deque(maxlen=max_len)
+    filepath = get_history_file_path()
+    if os.path.isfile(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                valid_entries = []
+                for pt in data:
+                    if isinstance(pt, dict) and "t" in pt and "v" in pt:
+                        valid_entries.append(pt)
+                valid_entries.sort(key=lambda x: x["t"])
+                for pt in valid_entries[-max_len:]:
+                    buf.append(pt)
+                logger.info("Loaded %d persistent history point(s) from %s", len(buf), filepath)
+        except Exception as e:
+            logger.warning("Could not load persistent history from %s: %s", filepath, e)
+    return buf
+
+
+def save_persistent_history(history_data: list):
+    """Atomically writes historical telemetry points to disk."""
+    filepath = get_history_file_path()
+    tmp_path = filepath + ".tmp"
+    try:
+        dirname = os.path.dirname(filepath)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(history_data, f)
+        os.replace(tmp_path, filepath)
+    except Exception as e:
+        logger.warning("Failed to save persistent history to %s: %s", filepath, e)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     get_state_fn: Optional[Callable] = None
-    history_buffer: deque = deque(maxlen=1440)  # 24 hours of 1-minute samples
+    history_buffer: deque = load_persistent_history(max_len=1440)
 
     def log_message(self, format, *args):
         # Suppress routine GET logging to prevent spam
@@ -1335,6 +1403,8 @@ class EmbeddedWebServer:
         self.host = host
         self.port = port
         DashboardHandler.get_state_fn = get_state_fn
+        if not DashboardHandler.history_buffer:
+            DashboardHandler.history_buffer = load_persistent_history(max_len=1440)
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._sampler_thread: Optional[threading.Thread] = None
@@ -1363,6 +1433,8 @@ class EmbeddedWebServer:
                         "v": round(state_data.get("bank_voltage", 0), 3),
                         "delta": round(state_data.get("delta_cell_mv", 0), 1)
                     })
+                    # Persist updated history to disk
+                    save_persistent_history(list(DashboardHandler.history_buffer))
         except Exception as e:
             logger.debug("History sampling error: %s", e)
 
@@ -1385,12 +1457,15 @@ class EmbeddedWebServer:
             self._thread.start()
             self._sampler_thread = threading.Thread(target=self._history_sampler_loop, name="HistorySampler60s", daemon=True)
             self._sampler_thread.start()
-            logger.info("Embedded Web Dashboard running at http://%s:%d (1-min history sampler active)", self.host, self.port)
+            logger.info("Embedded Web Dashboard running at http://%s:%d (persistent history sampler active: %s)",
+                        self.host, self.port, get_history_file_path())
         except Exception as e:
             logger.error("Failed to start Web Dashboard on port %d: %s", self.port, e)
 
     def stop(self):
         self._running = False
+        if DashboardHandler.history_buffer:
+            save_persistent_history(list(DashboardHandler.history_buffer))
         if self._server:
             try:
                 self._server.shutdown()
