@@ -175,39 +175,74 @@ bmsanta/
 
 ### Phase 4: Inverter Gateway & Field Deployment
 - [x] Implement Modbus RTU / RS-485 inverter server in `inverter_bus.py` (`/dev/ttyUSB0`).
-- [x] Implement Pylontech CAN broadcast gateway in `inverter_bus.py` (`can1`).
+- [x] Implement Pylontech CAN broadcast gateway in `inverter_bus.py` (`can0`).
 - [x] Deploy embedded dark-mode WebUI dashboard on port 5000 (`http://<ip>:5000`).
-- [ ] Connect RS-485 / CAN cable to physical solar hybrid inverter RJ45 communication port.
-- [ ] Verify closed-loop inverter control with live hybrid inverter (e.g. Sol-Ark, Growatt, Deye).
+- [x] Expand CAN hardware polling to 8 parallel packs (64 cells, 800 Ah, 20.48 kWh).
+- [x] Implement unrounded millivolt chart plotting + rounded 0.1V digital panes.
+- [x] Transition history sampling to 10-second intervals with 24-hour buffer (8,640 points).
+- [x] Non-volatile telemetry persistence in `/home/dangersorus/bmsanta/data/history.json` and `localStorage`.
+- [ ] Connect RS-485 / CAN cable to physical solar hybrid inverter RJ45 communication port:
+  - *Current Diagnosis (PowMr Inverter):* The inverter is throwing `Fault 04` under `LIB-485`. The current cable (Xiusiyt USB-RS485 for Seplos PUSUNG) wires `Pin 1 = B-, Pin 2 = A+`. PowMr RJ45 COM ports use `Pin 7 = A+, Pin 8 = B-` (`Pin 1 = +5V, Pin 2 = GND`). An RJ45 breakout / adapter re-pinning Pin 1/2 to Pin 7/8 is needed for serial communication.
+- [ ] Verify closed-loop inverter control with live PowMr inverter once cable pinout is adapted.
 - [ ] Optional: Home Assistant MQTT auto-discovery bridge.
 
 ---
 
-## 7. Deployment, Packaging & Backup Strategy
+## 7. Operational Topology & Hardware Mapping (As-Built)
 
-### 7.1 Automated Installation
+### 7.1 Live System Information
+* **Host:** Raspberry Pi Zero W (`192.168.1.217` / `bmsanta.local`)
+* **OS:** Debian GNU/Linux 12 (Bookworm, 64-bit Lite)
+* **User:** `dangersorus` (passwordless sudo enabled)
+* **CAN Interfaces:**
+  * Physical **`CAN0`** terminal on Waveshare HAT = Linux **`can1`** (Battery bus @ 250 kbps)
+  * Physical **`CAN1`** terminal on Waveshare HAT = Linux **`can0`** (Inverter CAN bus @ 250/500 kbps)
+* **Active Battery Bank:** 8x CATL 8S LBM025100A modules in parallel (64 cells, 800 Ah, 20.48 kWh)
+
+### 7.2 Multi-Module CAN Addressing Map
+During CAN bus interrogation, the 8 connected packs respond across 3 distinct node IDs:
+| Packs | Responding CAN ID | Multiplexing / Behavior |
+| :--- | :--- | :--- |
+| **Pack #1 – #5** | `0xAA` | Auto-multiplexed across frames by internal CMU daisy-chain controller |
+| **Pack #6** | `0xAB` | Direct node address |
+| **Pack #7 – #8** | `0xAD` | Direct node address |
+
+The discovery poller in `daemon/battery_bus.py` scans `0xAA..0xB1` with a `quiet_timeout` to ensure all 8 packs are fully populated into `aggregator.py` on every 1 Hz cycle.
+
+### 7.3 Telemetry & Running Graph Persistence
+* **Sampling Rate:** Every 10 seconds (8,640 samples = full 24-hour history window).
+* **Disk Storage:** Stored atomically at `/home/dangersorus/bmsanta/data/history.json`.
+* **Flash Wear Mitigation:** In-memory rolling deque (`maxlen=8640`), flushed to SD card every 60 seconds (every 6th sample) and on daemon shutdown.
+* **Browser Caching:** Mirrored to browser `localStorage` (`bmsanta_graph_history`) for instant graph rendering on page load.
+* **Plotting Precision:** Raw unrounded millivolt values plotted on Canvas; UI digital cards rounded to 0.1V to eliminate digital jitter.
+
+---
+
+## 8. Deployment, Packaging & Backup Strategy
+
+### 8.1 Automated Installation
 The repository includes an all-in-one automated installer [`install.sh`](file:///Users/csorus/Workspace/bmsanta/install.sh):
 ```bash
 git clone https://github.com/<user>/bmsanta.git ~/bmsanta
 cd ~/bmsanta
 sudo ./install.sh
 ```
-This script handles:
-1. Apt dependency installation (`python3-can`, `python3-serial`, `can-utils`, `iproute2`).
-2. Dialout, GPIO, and SPI group permission grants.
-3. `/boot/firmware/config.txt` kernel overlay validation for Waveshare MCP2515 controllers.
-4. Installation and activation of `can.service` and `bmsanta.service`.
-5. Automatic bring-up of `can0` and WebUI dashboard on port `5000`.
 
-### 7.2 Standalone Release Packaging
+### 8.2 Standalone Release Packaging
 Run [`package.sh`](file:///Users/csorus/Workspace/bmsanta/package.sh) to generate an offline, self-contained distribution archive:
 ```bash
 ./package.sh
 # Outputs: dist/bmsanta-v0.1.0.tar.gz + SHA-256 checksum
 ```
 
-### 7.3 System Backups
-* **OS Baseline MicroSD Image:** Stored locally at `bmsanta-baseline.img.gz` (1.0 GB compressed raw image). Flashable directly with Raspberry Pi Imager or `dd`.
-* **Hardware Config Backup:** Stored in `config/config.txt.example`.
-* **System Services:** Preserved in `systemd/can.service` and `systemd/bmsanta.service`.
+### 8.3 System Backups
+The `backup/` directory contains complete snapshots of the live system:
+* `backup/bmsanta-pi-rootfs.tar.gz`: Complete rootfs archive of `/home/dangersorus/bmsanta`, systemd units, hardware overlays, and sudo configuration.
+* `backup/pi-firmware-config.txt`: Hardware config with 16 MHz SPI clock and dual MCP2515 overlays.
+* `backup/pi-bmsanta.service`: Daemon systemd unit.
+* `backup/pi-can.service`: SocketCAN initialization systemd unit.
+* `backup/pi-history.json`: Snapshot of 3,000+ points of non-volatile 10-second telemetry.
+* `backup/pi-installed-packages.txt`: Complete `dpkg --get-selections` inventory.
+* `bmsanta-baseline.img.gz`: 1.0 GB compressed raw base OS image.
+* Git tag: `v0.1.2-10s-backup`.
 
