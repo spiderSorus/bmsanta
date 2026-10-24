@@ -13,6 +13,7 @@ This directory contains the complete backup of the **BMSanta Raspberry Pi Host O
 | `pi-bmsanta.service` | **BMSanta Daemon Service** (`/etc/systemd/system/bmsanta.service`) | Auto-starts BMSanta on boot at 1 Hz with automatic restart. |
 | `pi-can.service` | **SocketCAN Initialization Service** (`/etc/systemd/system/can.service`) | Automatically configures `can0` and `can1` at 250 kbps with auto-recovery on boot. |
 | `pi-installed-packages.txt` | **Debian Package Selection Inventory** | Lists all installed system packages (`can-utils`, `python3`, etc.) via `dpkg --get-selections`. |
+| `pi-history.json` | **Persistent Telemetry Voltage Log Data** | Non-volatile snapshot of 10s battery SOC, voltage, and delta cell historical points. |
 
 ---
 
