@@ -592,15 +592,15 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Running Charge State & Voltage Trend Chart (1-Minute Polling) -->
+    <!-- Running Charge State & Voltage Trend Chart (10-Second Polling) -->
     <div class="chart-card">
       <div class="chart-header">
         <div class="chart-title-area">
           <h2>
             <span>Running Charge State &amp; Voltage Trend</span>
-            <span class="badge badge-cyan" style="font-size:0.7rem; padding:2px 8px;"><span class="pulse-dot"></span> 1-MIN LIVE</span>
+            <span class="badge badge-cyan" style="font-size:0.7rem; padding:2px 8px;"><span class="pulse-dot"></span> 10-SEC LIVE</span>
           </h2>
-          <p>Historical State of Charge (SOC %) trajectory and bank voltage curve (1-minute polling)</p>
+          <p>Historical State of Charge (SOC %) trajectory and bank voltage curve (10-second polling)</p>
         </div>
         <div class="chart-controls">
           <div style="display: flex; gap: 6px;">
@@ -627,7 +627,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       </div>
 
       <div class="chart-footer">
-        <span id="chart-time-range">Showing last 3 hours (1-minute samples)</span>
+        <span id="chart-time-range">Showing last 3 hours (10-second samples)</span>
         <span id="chart-stats">Latest: --% | --.- V</span>
       </div>
     </div>
@@ -915,18 +915,18 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 
         document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
 
-        // Feed graph on live update if buffer is empty or minute has elapsed
+        // Feed graph on live update if buffer is empty or 10 seconds have elapsed
         if (data.online_modules > 0 && data.bank_voltage > 10.0) {
           const tNow = Math.floor(data.timestamp || Date.now() / 1000);
-          if (graphData.length === 0 || (tNow - graphData[graphData.length - 1].t >= 50)) {
+          if (graphData.length === 0 || (tNow - graphData[graphData.length - 1].t >= 8)) {
             graphData.push({
               t: tNow,
               soc: data.soc_pct || 0,
               v: data.bank_voltage || 0,
               delta: data.delta_cell_mv || 0
             });
-            if (graphData.length > 1440) graphData.shift();
-            try { localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-1440))); } catch (e) {}
+            if (graphData.length > 8640) graphData.shift();
+            try { localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-8640))); } catch (e) {}
             drawChart();
           }
         }
@@ -935,7 +935,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       }
     }
 
-    // --- 1-Minute Polling Running Charge State Graph ---
+    // --- 10-Second Polling Running Charge State Graph ---
     let graphData = [];
     try {
       const cached = localStorage.getItem('bmsanta_graph_history');
@@ -1012,7 +1012,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         if (Array.isArray(data) && data.length > 0) {
           graphData = data;
           try {
-            localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-1440)));
+            localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-8640)));
           } catch (e) {}
           drawChart();
         }
@@ -1119,7 +1119,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('Accumulating 1-minute charge telemetry...', padL + plotW / 2, padT + plotH / 2);
+        ctx.fillText('Accumulating 10-second charge telemetry...', padL + plotW / 2, padT + plotH / 2);
         ctx.restore();
         return;
       }
@@ -1235,7 +1235,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         if (tooltip) {
           const tStr = new Date(closest.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
           tooltip.innerHTML = `
-            <div style="font-weight:700; color:#cbd5e1; margin-bottom:3px; font-size:0.75rem;">⏱ ${tStr} (1-min sample)</div>
+            <div style="font-weight:700; color:#cbd5e1; margin-bottom:3px; font-size:0.75rem;">⏱ ${tStr} (10-sec sample)</div>
             <div style="color:#38bdf8; font-weight:600;">SOC: <b>${closest.soc.toFixed(1)}%</b></div>
             <div style="color:#fbbf24; font-weight:600;">Voltage: <b>${closest.v.toFixed(3)} V</b></div>
             <div style="color:#94a3b8; font-size:0.7rem; margin-top:2px;">Cell &Delta;V: <b>${(closest.delta || 0).toFixed(1)} mV</b></div>
@@ -1249,7 +1249,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       }
 
       const hours = (selectedRangeMinutes / 60).toFixed(selectedRangeMinutes % 60 === 0 ? 0 : 1);
-      document.getElementById('chart-time-range').textContent = `Showing last ${hours} hour${selectedRangeMinutes > 60 ? 's' : ''} (${visiblePoints.length} sample${visiblePoints.length !== 1 ? 's' : ''} @ 1 min)`;
+      document.getElementById('chart-time-range').textContent = `Showing last ${hours} hour${selectedRangeMinutes > 60 ? 's' : ''} (${visiblePoints.length} sample${visiblePoints.length !== 1 ? 's' : ''} @ 10s)`;
 
       if (visiblePoints.length > 0) {
         const latest = visiblePoints[visiblePoints.length - 1];
@@ -1271,9 +1271,9 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     updateDashboard();
     setInterval(updateDashboard, 1000);
 
-    // Initial graph poll + 1-minute recurring polling
+    // Initial graph poll + 10-second recurring polling
     pollGraph();
-    setInterval(pollGraph, 60000);
+    setInterval(pollGraph, 10000);
   </script>
 </body>
 </html>
@@ -1299,7 +1299,7 @@ def get_history_file_path() -> str:
     return "/tmp/bmsanta_history.json"
 
 
-def load_persistent_history(max_len: int = 1440) -> deque:
+def load_persistent_history(max_len: int = 8640) -> deque:
     """Loads historical telemetry points from persistent disk storage into a deque."""
     buf = deque(maxlen=max_len)
     filepath = get_history_file_path()
@@ -1338,7 +1338,7 @@ def save_persistent_history(history_data: list):
 
 class DashboardHandler(BaseHTTPRequestHandler):
     get_state_fn: Optional[Callable] = None
-    history_buffer: deque = load_persistent_history(max_len=1440)
+    history_buffer: deque = load_persistent_history(max_len=8640)
 
     def log_message(self, format, *args):
         # Suppress routine GET logging to prevent spam
@@ -1404,7 +1404,7 @@ class EmbeddedWebServer:
         self.port = port
         DashboardHandler.get_state_fn = get_state_fn
         if not DashboardHandler.history_buffer:
-            DashboardHandler.history_buffer = load_persistent_history(max_len=1440)
+            DashboardHandler.history_buffer = load_persistent_history(max_len=8640)
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._sampler_thread: Optional[threading.Thread] = None
@@ -1425,16 +1425,17 @@ class EmbeddedWebServer:
                         pass
             if state_data and state_data.get("online_modules", 0) > 0 and state_data.get("bank_voltage", 0) > 10.0:
                 t_now = int(state_data.get("timestamp") or time.time())
-                # Append sample if empty or at least 50 seconds since last sample
-                if not DashboardHandler.history_buffer or (t_now - DashboardHandler.history_buffer[-1]["t"] >= 50):
+                # Append sample if empty or at least 8 seconds since last sample
+                if not DashboardHandler.history_buffer or (t_now - DashboardHandler.history_buffer[-1]["t"] >= 8):
                     DashboardHandler.history_buffer.append({
                         "t": t_now,
                         "soc": round(state_data.get("soc_pct", 0), 1),
                         "v": round(state_data.get("bank_voltage", 0), 3),
                         "delta": round(state_data.get("delta_cell_mv", 0), 1)
                     })
-                    # Persist updated history to disk
-                    save_persistent_history(list(DashboardHandler.history_buffer))
+                    # Persist updated history to disk every 6 samples (~60s) to minimize SD card write wear
+                    if len(DashboardHandler.history_buffer) % 6 == 0:
+                        save_persistent_history(list(DashboardHandler.history_buffer))
         except Exception as e:
             logger.debug("History sampling error: %s", e)
 
@@ -1442,7 +1443,7 @@ class EmbeddedWebServer:
         # Immediate sample on start
         self._sample_history_point()
         while self._running:
-            for _ in range(60):
+            for _ in range(10):
                 if not self._running:
                     break
                 time.sleep(1)
@@ -1455,7 +1456,7 @@ class EmbeddedWebServer:
             self._server = HTTPServer((self.host, self.port), DashboardHandler)
             self._thread = threading.Thread(target=self._server.serve_forever, name="WebDashboardServer", daemon=True)
             self._thread.start()
-            self._sampler_thread = threading.Thread(target=self._history_sampler_loop, name="HistorySampler60s", daemon=True)
+            self._sampler_thread = threading.Thread(target=self._history_sampler_loop, name="HistorySampler10s", daemon=True)
             self._sampler_thread.start()
             logger.info("Embedded Web Dashboard running at http://%s:%d (persistent history sampler active: %s)",
                         self.host, self.port, get_history_file_path())
