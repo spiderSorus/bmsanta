@@ -13,21 +13,24 @@ from daemon.safety import SafetyManager, SafetyStatus, SafetyThresholds
 
 logger = logging.getLogger("bmsanta.aggregator")
 
-# Approximate LiFePO4 8S resting OCV curve for SOC estimation
+# Calibrated LiFePO4 8S curve for CATL LBM025100A under light inverter tare load (~20-25C)
+# Accounts for LFP flat plateau (3.25V-3.31V/cell) so surface-charge relaxation does not exaggerates drain
 # (Voltage, SOC %)
 LFP_8S_OCV_POINTS = [
-    (27.20, 100.0),
-    (26.80, 95.0),
-    (26.60, 90.0),
-    (26.50, 80.0),
-    (26.40, 70.0),
-    (26.30, 60.0),
-    (26.20, 50.0),
-    (26.00, 30.0),
-    (25.80, 20.0),
-    (25.40, 10.0),
-    (24.50, 5.0),
-    (23.00, 0.0),
+    (27.60, 100.0),  # 3.450 V/cell (absorption knee)
+    (26.88, 95.0),   # 3.360 V/cell (settled full charge)
+    (26.64, 90.0),   # 3.330 V/cell (upper plateau)
+    (26.48, 80.0),   # 3.310 V/cell
+    (26.36, 72.0),   # 3.295 V/cell
+    (26.24, 65.0),   # 3.280 V/cell
+    (26.12, 58.0),   # 3.265 V/cell
+    (26.00, 50.0),   # 3.250 V/cell (mid-plateau under light load)
+    (25.84, 40.0),   # 3.230 V/cell
+    (25.68, 30.0),   # 3.210 V/cell
+    (25.52, 20.0),   # 3.190 V/cell
+    (25.12, 10.0),   # 3.140 V/cell
+    (24.40, 5.0),    # 3.050 V/cell
+    (22.40, 0.0),    # 2.800 V/cell
 ]
 
 
@@ -160,9 +163,9 @@ class Aggregator:
             self._filtered_soc = raw_soc
             self._prev_mod_count = mod_count
         else:
-            # Gentle alpha=0.05 (~20s time constant) to filter millivolt ADC jitter
-            # Slew faster (alpha=0.20) if a major shift (>15%) occurs
-            alpha = 0.20 if abs(raw_soc - self._filtered_soc) > 15.0 else 0.05
+            # Smooth EMA (alpha=0.25 at 30s polling -> ~2 min time constant) to filter millivolt ADC jitter
+            # Slew faster (alpha=0.50) if a major shift (>15%) occurs
+            alpha = 0.50 if abs(raw_soc - self._filtered_soc) > 15.0 else 0.25
             self._filtered_soc = (1.0 - alpha) * self._filtered_soc + alpha * raw_soc
 
         soc = round(self._filtered_soc, 1)

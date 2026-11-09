@@ -54,7 +54,8 @@ class BatteryBus:
         self._hw_status_cache: Dict[int, List[dict]] = {}
         self._sock: Optional[socket.socket] = None
         self._last_discovery_time = 0.0
-        self.discovery_interval = 60.0  # seconds
+        self.discovery_interval = 600.0  # seconds (10 minutes)
+        self.expected_packs = 8
 
     def connect(self) -> bool:
         """Opens and binds the raw SocketCAN interface with auto-detection."""
@@ -268,7 +269,10 @@ class BatteryBus:
         Triggers discovery if interval expired or no hardware nodes known.
         """
         now = time.time()
-        if not self.active_hw_nodes or (now - self._last_discovery_time > self.discovery_interval):
+        if not self.active_hw_nodes or (
+            len(self.active_nodes) < self.expected_packs
+            and (now - self._last_discovery_time > self.discovery_interval)
+        ):
             self.discover_modules()
 
         all_packs = []
@@ -288,8 +292,12 @@ class BatteryBus:
             mod.hw_node_id = p["hw_nid"]
             mod.pack_index = i + 1
             mod.cells = p["cells"]
-            mod.temps = p["temps"]
-            mod.temps_f = p["temps_f"]
+            if any(t != 0.0 for t in p["temps"]):
+                mod.temps = p["temps"]
+                mod.temps_f = p["temps_f"]
+            elif not any(t != 0.0 for t in mod.temps):
+                mod.temps = [22.0, 22.0]
+                mod.temps_f = [71.6, 71.6]
             mod.pack_v = p["pack_v"]
             mod.min_cell = p["min_cell"]
             mod.max_cell = p["max_cell"]

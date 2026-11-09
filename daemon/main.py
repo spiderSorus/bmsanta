@@ -33,11 +33,13 @@ class BMSantaService:
                  can_interface: str = "can0",
                  rs485_port: str = "/dev/ttyUSB0",
                  inverter_can_interface: str = "can1",
-                 web_port: int = 5000):
+                 web_port: int = 5000,
+                 poll_interval: float = 30.0):
         self.can_interface = can_interface
         self.rs485_port = rs485_port
         self.inverter_can_interface = inverter_can_interface
         self.web_port = web_port
+        self.poll_interval = max(1.0, float(poll_interval))
 
         self.battery_bus = BatteryBus(interface=self.can_interface)
         self.aggregator = Aggregator()
@@ -110,6 +112,7 @@ class BMSantaService:
     def _write_status_json(self, state):
         status_dict = self._format_status_dict(state)
         self._latest_status_dict = status_dict
+        self.web_server.record_state(status_dict)
 
         content = json.dumps(status_dict, indent=2)
         for target in [STATUS_FILE, FALLBACK_STATUS_FILE]:
@@ -123,7 +126,7 @@ class BMSantaService:
                 pass
 
     def _run_loop(self):
-        logger.info("BMSanta main control loop active (1 Hz poll rate).")
+        logger.info("BMSanta main control loop active (%.0fs poll interval).", self.poll_interval)
         while self._running:
             t0 = time.time()
             try:
@@ -151,9 +154,13 @@ class BMSantaService:
             except Exception as e:
                 logger.error("Exception in control loop: %s", e, exc_info=True)
 
-            elapsed = time.time() - t0
-            sleep_time = max(0.1, 1.0 - elapsed)
-            time.sleep(sleep_time)
+            # Sleep until next poll cycle in small increments so SIGTERM exits promptly
+            target_wake = t0 + self.poll_interval
+            while self._running:
+                rem = target_wake - time.time()
+                if rem <= 0:
+                    break
+                time.sleep(min(0.5, rem))
 
         # Cleanup on exit
         logger.info("Stopping gateways and closing bus connections...")
@@ -169,12 +176,14 @@ def main():
     rs485_dev = os.environ.get("BMSANTA_RS485_DEV", "/dev/ttyUSB0")
     inverter_can = os.environ.get("BMSANTA_INVERTER_CAN", "can0")
     web_port = int(os.environ.get("BMSANTA_WEB_PORT", "5000"))
+    poll_interval = float(os.environ.get("BMSANTA_POLL_INTERVAL", "30.0"))
 
     service = BMSantaService(
         can_interface=can_iface,
         rs485_port=rs485_dev,
         inverter_can_interface=inverter_can,
-        web_port=web_port
+        web_port=web_port,
+        poll_interval=poll_interval
     )
     service.start()
 

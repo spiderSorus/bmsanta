@@ -6,12 +6,15 @@ Optimized for multi-pack daisy chains (up to 8+ CATL LBM025100A 8S modules).
 """
 
 import os
+import gzip
 import time
 import json
+import socket
 import logging
 import threading
 from collections import deque
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlsplit, parse_qs
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Callable
 
 logger = logging.getLogger("bmsanta.web")
@@ -592,15 +595,15 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Running Charge State & Voltage Trend Chart (10-Second Polling) -->
+    <!-- Running Charge State & Voltage Trend Chart (30-Second Polling) -->
     <div class="chart-card">
       <div class="chart-header">
         <div class="chart-title-area">
           <h2>
             <span>Running Charge State &amp; Voltage Trend</span>
-            <span class="badge badge-cyan" style="font-size:0.7rem; padding:2px 8px;"><span class="pulse-dot"></span> 10-SEC LIVE</span>
+            <span class="badge badge-cyan" style="font-size:0.7rem; padding:2px 8px;"><span class="pulse-dot"></span> 30-SEC LIVE</span>
           </h2>
-          <p>Historical State of Charge (SOC %) trajectory and bank voltage curve (10-second polling)</p>
+          <p>Historical State of Charge (SOC %) trajectory and bank voltage curve (30-second polling)</p>
         </div>
         <div class="chart-controls">
           <div style="display: flex; gap: 6px;">
@@ -627,7 +630,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       </div>
 
       <div class="chart-footer">
-        <span id="chart-time-range">Showing last 3 hours (10-second samples)</span>
+        <span id="chart-time-range">Showing last 3 hours (30-second samples)</span>
         <span id="chart-stats">Latest: --% | --.- V</span>
       </div>
     </div>
@@ -697,14 +700,20 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     </div>
 
     <footer>
-      🎅 BMSanta Multi-Module ESS Controller • Polling at 1 Hz • Last Response: <span id="last-update">--:--:--</span>
+      🎅 BMSanta Multi-Module ESS Controller • BMS Poll Interval: 30s • Last Response: <span id="last-update">--:--:--</span>
     </footer>
   </div>
 
   <script>
+    let isUpdatingStatus = false;
     async function updateDashboard() {
+      if (isUpdatingStatus) return;
+      isUpdatingStatus = true;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
       try {
-        const resp = await fetch('/api/status');
+        const resp = await fetch('/api/status', { signal: ctrl.signal });
+        clearTimeout(timer);
         if (!resp.ok) return;
         const data = await resp.json();
 
@@ -915,10 +924,10 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 
         document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
 
-        // Feed graph on live update if buffer is empty or 10 seconds have elapsed
-        if (data.online_modules > 0 && data.bank_voltage > 10.0) {
+        // Feed graph on live update once initial server history sync has completed
+        if (lastServerSyncT > 0 && data.online_modules > 0 && data.bank_voltage > 10.0) {
           const tNow = Math.floor(data.timestamp || Date.now() / 1000);
-          if (graphData.length === 0 || (tNow - graphData[graphData.length - 1].t >= 8)) {
+          if (graphData.length === 0 || (tNow - graphData[graphData.length - 1].t >= 25)) {
             graphData.push({
               t: tNow,
               soc: data.soc_pct || 0,
@@ -931,7 +940,10 @@ HTML_DASHBOARD = """<!DOCTYPE html>
           }
         }
       } catch (e) {
-        console.error("Dashboard update error:", e);
+        if (e.name !== 'AbortError') console.error("Dashboard update error:", e);
+      } finally {
+        clearTimeout(timer);
+        isUpdatingStatus = false;
       }
     }
 
@@ -1004,22 +1016,66 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       window.addEventListener('resize', drawChart);
     }
 
-    async function pollGraph() {
+    let isPollingGraph = false;
+    let lastServerSyncT = 0;
+
+    function mergeHistoryPoints(existing, incoming) {
+      const byTime = new Map();
+      for (let i = 0; i < existing.length; i++) {
+        const pt = existing[i];
+        if (pt && typeof pt.t === 'number') byTime.set(pt.t, pt);
+      }
+      for (let i = 0; i < incoming.length; i++) {
+        const pt = incoming[i];
+        if (pt && typeof pt.t === 'number') byTime.set(pt.t, pt);
+      }
+      const merged = Array.from(byTime.values());
+      merged.sort((a, b) => a.t - b.t);
+      return merged.length > 8640 ? merged.slice(-8640) : merged;
+    }
+
+    async function pollGraph(forceFull = false) {
+      if (isPollingGraph) return;
+      isPollingGraph = true;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
-        const resp = await fetch('/api/history');
+        const useSince = (!forceFull && lastServerSyncT > 0) ? lastServerSyncT : 0;
+        const url = useSince > 0 ? `/api/history?since=${useSince}` : '/api/history';
+        const resp = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(timer);
         if (!resp.ok) return;
         const data = await resp.json();
         if (Array.isArray(data) && data.length > 0) {
-          graphData = data;
+          const maxIncomingT = data[data.length - 1].t || 0;
+          if (maxIncomingT > lastServerSyncT) {
+            lastServerSyncT = maxIncomingT;
+          }
+          if (useSince > 0) {
+            graphData = mergeHistoryPoints(graphData, data);
+          } else {
+            // Full authoritative history from server replaces any stale/gapped localStorage cache
+            graphData = data.slice(-8640);
+          }
           try {
-            localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData.slice(-8640)));
+            localStorage.setItem('bmsanta_graph_history', JSON.stringify(graphData));
           } catch (e) {}
           drawChart();
         }
       } catch (err) {
-        console.warn("History poll error:", err);
+        if (err.name !== 'AbortError') console.warn("History poll error:", err);
+      } finally {
+        clearTimeout(timer);
+        isPollingGraph = false;
       }
     }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        updateDashboard();
+        pollGraph();
+      }
+    });
 
     function drawChart() {
       if (!canvas || !ctx) return;
@@ -1249,7 +1305,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       }
 
       const hours = (selectedRangeMinutes / 60).toFixed(selectedRangeMinutes % 60 === 0 ? 0 : 1);
-      document.getElementById('chart-time-range').textContent = `Showing last ${hours} hour${selectedRangeMinutes > 60 ? 's' : ''} (${visiblePoints.length} sample${visiblePoints.length !== 1 ? 's' : ''} @ 10s)`;
+      document.getElementById('chart-time-range').textContent = `Showing last ${hours} hour${selectedRangeMinutes > 60 ? 's' : ''} (${visiblePoints.length} sample${visiblePoints.length !== 1 ? 's' : ''} @ 30s)`;
 
       if (visiblePoints.length > 0) {
         const latest = visiblePoints[visiblePoints.length - 1];
@@ -1267,13 +1323,13 @@ HTML_DASHBOARD = """<!DOCTYPE html>
       ctx.restore();
     }
 
-    // 1 Hz real-time dashboard poll
+    // Dashboard status poll (every 10s, matching low-drain 30s BMS cycle)
     updateDashboard();
-    setInterval(updateDashboard, 1000);
+    setInterval(updateDashboard, 10000);
 
-    // Initial graph poll + 10-second recurring polling
+    // Initial graph poll + 30-second recurring polling
     pollGraph();
-    setInterval(pollGraph, 10000);
+    setInterval(pollGraph, 30000);
   </script>
 </body>
 </html>
@@ -1321,43 +1377,95 @@ def load_persistent_history(max_len: int = 8640) -> deque:
     return buf
 
 
+_HISTORY_SAVE_LOCK = threading.Lock()
+
+
 def save_persistent_history(history_data: list):
     """Atomically writes historical telemetry points to disk."""
     filepath = get_history_file_path()
     tmp_path = filepath + ".tmp"
-    try:
-        dirname = os.path.dirname(filepath)
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(history_data, f)
-        os.replace(tmp_path, filepath)
-    except Exception as e:
-        logger.warning("Failed to save persistent history to %s: %s", filepath, e)
+    with _HISTORY_SAVE_LOCK:
+        try:
+            dirname = os.path.dirname(filepath)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(history_data, f)
+            os.replace(tmp_path, filepath)
+        except Exception as e:
+            logger.warning("Failed to save persistent history to %s: %s", filepath, e)
+
+
+HTML_DASHBOARD_BYTES = HTML_DASHBOARD.encode("utf-8")
+HTML_DASHBOARD_GZIP = gzip.compress(HTML_DASHBOARD_BYTES, compresslevel=6)
+
+
+class DashboardHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 32
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    timeout = 5
     get_state_fn: Optional[Callable] = None
     history_buffer: deque = load_persistent_history(max_len=8640)
+    _history_json_cache: bytes = b"[]"
+    _history_gzip_cache: bytes = gzip.compress(b"[]", compresslevel=6)
+
+    @classmethod
+    def refresh_history_cache(cls):
+        raw = json.dumps(list(cls.history_buffer), separators=(",", ":")).encode("utf-8")
+        cls._history_json_cache = raw
+        cls._history_gzip_cache = gzip.compress(raw, compresslevel=6)
 
     def log_message(self, format, *args):
         # Suppress routine GET logging to prevent spam
         pass
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
+    def _accepts_gzip(self) -> bool:
+        enc = self.headers.get("Accept-Encoding", "")
+        return "gzip" in enc.lower()
 
-    def do_GET(self):
-        if self.path == "/" or self.path == "/index.html":
-            content = HTML_DASHBOARD.encode("utf-8")
+    def _send_payload(self, status_code: int, content_type: str, raw_bytes: bytes,
+                      gzip_bytes: Optional[bytes] = None, cors: bool = False):
+        use_gzip = gzip_bytes is not None and self._accepts_gzip()
+        body = gzip_bytes if use_gzip else raw_bytes
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
+            if cors:
+                self.send_header("Access-Control-Allow-Origin", "*")
+            if use_gzip:
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):
+            pass
+
+    def do_HEAD(self):
+        try:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(content)
-        elif self.path == "/api/status":
+        except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):
+            pass
+
+    def do_GET(self):
+        parsed = urlsplit(self.path)
+        route = parsed.path
+
+        if route == "/" or route == "/index.html":
+            self._send_payload(
+                200,
+                "text/html; charset=utf-8",
+                HTML_DASHBOARD_BYTES,
+                gzip_bytes=HTML_DASHBOARD_GZIP,
+            )
+        elif route == "/api/status":
             state_data = {}
             if DashboardHandler.get_state_fn:
                 state_data = DashboardHandler.get_state_fn()
@@ -1370,32 +1478,42 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
-            content = json.dumps(state_data).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-        elif self.path == "/api/history":
-            history_data = list(DashboardHandler.history_buffer)
-            content = json.dumps(history_data).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-        elif self.path == "/api/health":
-            content = b'{"status":"ok"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
+            content = json.dumps(state_data, separators=(",", ":")).encode("utf-8")
+            self._send_payload(200, "application/json", content, cors=True)
+        elif route == "/api/history":
+            qs = parse_qs(parsed.query)
+            since_val = 0
+            if "since" in qs and qs["since"]:
+                try:
+                    since_val = int(float(qs["since"][0]))
+                except (ValueError, TypeError):
+                    since_val = 0
+
+            if since_val > 0:
+                delta_pts = [pt for pt in list(DashboardHandler.history_buffer) if pt.get("t", 0) > since_val]
+                content = json.dumps(delta_pts, separators=(",", ":")).encode("utf-8")
+                self._send_payload(200, "application/json", content, cors=True)
+            else:
+                self._send_payload(
+                    200,
+                    "application/json",
+                    DashboardHandler._history_json_cache,
+                    gzip_bytes=DashboardHandler._history_gzip_cache,
+                    cors=True,
+                )
+        elif route == "/api/health":
+            self._send_payload(200, "application/json", b'{"status":"ok"}')
         else:
-            self.send_response(404)
-            self.end_headers()
+            try:
+                self.send_response(404)
+                self.send_header("Connection", "close")
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):
+                pass
+
+
+# Initialize pre-serialized history cache at module import
+DashboardHandler.refresh_history_cache()
 
 
 class EmbeddedWebServer:
@@ -1405,10 +1523,30 @@ class EmbeddedWebServer:
         DashboardHandler.get_state_fn = get_state_fn
         if not DashboardHandler.history_buffer:
             DashboardHandler.history_buffer = load_persistent_history(max_len=8640)
+        DashboardHandler.refresh_history_cache()
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._sampler_thread: Optional[threading.Thread] = None
         self._running = False
+
+    def record_state(self, state_data: dict):
+        """Records a BMS check-in directly into the history buffer and flushes periodically to disk."""
+        try:
+            if state_data and state_data.get("online_modules", 0) > 0 and state_data.get("bank_voltage", 0) > 10.0:
+                t_now = int(state_data.get("timestamp") or time.time())
+                if not DashboardHandler.history_buffer or (t_now > DashboardHandler.history_buffer[-1]["t"]):
+                    DashboardHandler.history_buffer.append({
+                        "t": t_now,
+                        "soc": round(state_data.get("soc_pct", 0), 1),
+                        "v": round(state_data.get("bank_voltage", 0), 3),
+                        "delta": round(state_data.get("delta_cell_mv", 0), 1)
+                    })
+                    DashboardHandler.refresh_history_cache()
+                    # Persist updated history to disk every 4 samples (~2 min at 30s poll) to minimize SD card wear
+                    if len(DashboardHandler.history_buffer) % 4 == 0:
+                        save_persistent_history(list(DashboardHandler.history_buffer))
+        except Exception as e:
+            logger.debug("History record_state error: %s", e)
 
     def _sample_history_point(self):
         try:
@@ -1425,17 +1563,9 @@ class EmbeddedWebServer:
                         pass
             if state_data and state_data.get("online_modules", 0) > 0 and state_data.get("bank_voltage", 0) > 10.0:
                 t_now = int(state_data.get("timestamp") or time.time())
-                # Append sample if empty or at least 8 seconds since last sample
-                if not DashboardHandler.history_buffer or (t_now - DashboardHandler.history_buffer[-1]["t"] >= 8):
-                    DashboardHandler.history_buffer.append({
-                        "t": t_now,
-                        "soc": round(state_data.get("soc_pct", 0), 1),
-                        "v": round(state_data.get("bank_voltage", 0), 3),
-                        "delta": round(state_data.get("delta_cell_mv", 0), 1)
-                    })
-                    # Persist updated history to disk every 6 samples (~60s) to minimize SD card write wear
-                    if len(DashboardHandler.history_buffer) % 6 == 0:
-                        save_persistent_history(list(DashboardHandler.history_buffer))
+                # Fallback sampler if record_state wasn't called directly
+                if not DashboardHandler.history_buffer or (t_now - DashboardHandler.history_buffer[-1]["t"] >= 25):
+                    self.record_state(state_data)
         except Exception as e:
             logger.debug("History sampling error: %s", e)
 
@@ -1443,7 +1573,7 @@ class EmbeddedWebServer:
         # Immediate sample on start
         self._sample_history_point()
         while self._running:
-            for _ in range(10):
+            for _ in range(30):
                 if not self._running:
                     break
                 time.sleep(1)
@@ -1453,7 +1583,7 @@ class EmbeddedWebServer:
     def start(self):
         try:
             self._running = True
-            self._server = HTTPServer((self.host, self.port), DashboardHandler)
+            self._server = DashboardHTTPServer((self.host, self.port), DashboardHandler)
             self._thread = threading.Thread(target=self._server.serve_forever, name="WebDashboardServer", daemon=True)
             self._thread.start()
             self._sampler_thread = threading.Thread(target=self._history_sampler_loop, name="HistorySampler10s", daemon=True)
