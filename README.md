@@ -8,9 +8,9 @@ An open, offline, zero-dependency Battery Management System (BMS) controller and
 
 * **Host Device:** Raspberry Pi Zero W (`192.168.1.217` / `bmsanta.local`), running 64-bit Debian Bookworm Lite.
 * **Active Battery Bank:** **8x CATL 8S LBM025100A Modules** (64 cells total, 800 Ah capacity, 20.48 kWh energy).
-* **CAN Bus Communication:** Online at 250 kbps via dual-channel Waveshare MCP2515 SPI HAT. All 8 packs continuously discovered and aggregated at 1 Hz with ~17–20 mV cell balance delta.
-* **Web Telemetry Dashboard:** Active at `http://192.168.1.217:5000` with **10-second high-resolution sampling** and non-volatile disk persistence.
-* **System Backup:** Full system rootfs archive, package inventories, and configuration backups saved in [`backup/`](file:///Users/csorus/Workspace/bmsanta/backup/) and tagged at `v0.1.2-10s-backup`.
+* **CAN Bus Communication:** Online at 250 kbps via dual-channel Waveshare MCP2515 SPI HAT. All 8 packs continuously discovered and aggregated on a **low-drain 30-second polling interval** (configurable via `BMSANTA_POLL_INTERVAL`) with ~17–20 mV cell balance delta and a calibrated LFP OCV curve.
+* **Web Telemetry Dashboard:** Active at `http://192.168.1.217:5000` with **30-second sampling**, multi-threaded Gzip HTTP delivery, delta-sync (`/api/history?since=...`), and non-volatile disk persistence.
+* **System Backup:** Full system rootfs archive, package inventories, and configuration backups saved in [`backup/`](backup/) and tagged at `v0.1.2-10s-backup`.
 
 ---
 
@@ -59,13 +59,25 @@ During CAN bus scanning, packs respond according to their hardware position and 
 
 ## 📊 Web Dashboard & Telemetry Persistence
 
-The embedded dashboard runs directly from `daemon/web_server.py` with zero external dependencies:
-* **Live Refresh:** 1 Hz pack telemetry polling via `/api/status`.
-* **Historical Trend Graph:** Canvas-based charge curve updated **every 10 seconds** via `/api/history`.
+The embedded dashboard runs directly from [`daemon/web_server.py`](daemon/web_server.py) (`ThreadingHTTPServer`) with zero external dependencies:
+* **Live Refresh:** 10-second browser status polling via `/api/status`, paired with the 30-second BMS interrogation cycle (`BMSANTA_POLL_INTERVAL=30`).
+* **Historical Trend Graph:** Canvas-based charge and voltage trajectory updated **every 30 seconds** via `/api/history` (with incremental `?since=<timestamp>` delta fetching and pre-compressed Gzip responses).
+* **Calibrated LFP SOC Curve:** [`daemon/aggregator.py`](daemon/aggregator.py) uses a calibrated 8S LiFePO4 voltage-to-SOC curve tailored for CATL LBM025100A cells under light inverter tare load (~20–25°C) with exponential moving average (EMA) filtering (`alpha=0.25`).
 * **Precision Plotting:** Plots raw, unrounded millivolt-level bank voltages for granular trend analysis, while maintaining 0.1V rounded digital pack panes to eliminate visual jitter.
-* **Non-Volatile Storage:** Telemetry points are saved to `/home/dangersorus/bmsanta/data/history.json` (holds up to 8,640 samples = full 24 hours at 10s resolution).
-* **SD Card Flash Wear Mitigation:** Live points stay in RAM and are flushed to disk every 60 seconds (every 6th sample) and on daemon shutdown.
+* **Non-Volatile Storage:** Telemetry points are saved to `/home/dangersorus/bmsanta/data/history.json` (holds up to 8,640 samples = up to 72 hours at 30s resolution).
+* **SD Card Flash Wear Mitigation:** Live points stay in RAM and are atomically flushed to disk every 4 samples (~2 minutes at 30s polling) and on daemon shutdown.
 * **Browser Caching:** History is mirrored to browser `localStorage` (`bmsanta_graph_history`) for instant graph rendering upon page refresh.
+
+---
+
+## 📦 Installation & Quick Start
+
+Clone the repository and run the automated installer on a Raspberry Pi:
+```bash
+git clone https://github.com/spiderSorus/bmsanta.git ~/bmsanta
+cd ~/bmsanta
+sudo ./install.sh
+```
 
 ---
 
@@ -110,7 +122,7 @@ python3 -m tools.live_cells
 
 ## 💾 Backups & Disaster Recovery
 
-Snapshots are stored in [`backup/`](file:///Users/csorus/Workspace/bmsanta/backup/):
+Snapshots are stored in [`backup/`](backup/):
 * **`bmsanta-pi-rootfs.tar.gz`:** Complete root filesystem archive (91 MB).
 * **`pi-firmware-config.txt`:** Pi hardware config with 16 MHz SPI clock and dual MCP2515 overlays.
 * **`pi-bmsanta.service` & `pi-can.service`:** Systemd service definitions.
@@ -118,4 +130,4 @@ Snapshots are stored in [`backup/`](file:///Users/csorus/Workspace/bmsanta/backu
 * **`pi-installed-packages.txt`:** Complete Debian package selection inventory.
 * **`dist/bmsanta-v0.1.0.tar.gz`:** Offline installer package with SHA-256 checksum.
 
-To restore onto a fresh Raspberry Pi OS install, extract `backup/bmsanta-pi-rootfs.tar.gz` or run `sudo ./install.sh`. See [`backup/README.md`](file:///Users/csorus/Workspace/bmsanta/backup/README.md) for step-by-step restoration procedures.
+To restore onto a fresh Raspberry Pi OS install, extract `backup/bmsanta-pi-rootfs.tar.gz` or run `sudo ./install.sh`. See [`backup/README.md`](backup/README.md) for step-by-step restoration procedures.
