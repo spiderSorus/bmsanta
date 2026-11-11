@@ -1,6 +1,14 @@
 # 🎅 BMSanta: 24V CATL Multi-Module ESS Controller & Inverter Gateway
 
-An open, offline, zero-dependency Battery Management System (BMS) controller and hybrid solar inverter gateway designed for second-life **CATL LBM025100A** 24V LiFePO4 (LFP) battery modules running in parallel.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+An open, offline, zero-dependency Battery Management System (BMS) controller and hybrid solar inverter gateway designed for second-life **CATL LBM025100A** 24V LiFePO4 (LFP) battery modules running in parallel. Built for off-grid solar builders and second-life EV/ESS battery integrators running Raspberry Pi Linux controllers with SocketCAN and RS-485 interfaces.
+
+## 🛠 Built With
+
+* **Language & Runtime:** Python 3.9+ (`daemon/`, `tools/`) running as a `systemd` service on 64-bit Debian Bookworm Lite.
+* **Hardware Buses:** Linux SocketCAN (`python-can` @ 250/500 kbps via dual-channel Waveshare MCP2515 SPI HAT) and RS-485 (`pyserial` for Pylontech / Modbus RTU inverter protocols).
+* **Web Dashboard:** Zero-dependency multi-threaded Python `ThreadingHTTPServer` (`daemon/web_server.py`) with Gzip compression, delta-sync history endpoints, and HTML5 Canvas telemetry charts.
 
 ---
 
@@ -131,3 +139,28 @@ Snapshots are stored in [`backup/`](backup/):
 * **`dist/bmsanta-v0.1.0.tar.gz`:** Offline installer package with SHA-256 checksum.
 
 To restore onto a fresh Raspberry Pi OS install, extract `backup/bmsanta-pi-rootfs.tar.gz` or run `sudo ./install.sh`. See [`backup/README.md`](backup/README.md) for step-by-step restoration procedures.
+
+---
+
+## 🗺 Roadmap & Planned Work Ahead (35+ Hours)
+
+* [ ] **Phase 1 — Closed-Loop PowMr / Pylontech RS-485 & CAN Verification (~8 hrs)**
+  * [ ] Complete end-to-end closed-loop handshake validation with PowMr hybrid inverter (`LIB-485` Pylontech protocol over `/dev/ttyUSB0` and `can0` @ 500 kbps) and clear inverter `Fault 04`.
+  * [ ] Add dynamic charge/discharge current limit derating (`CCL` / `DCL`) based on cell temperature extremes and pack delta-V imbalance.
+* [ ] **Phase 2 — Coulomb Counting & Adaptive SOC Calibration (~8 hrs)**
+  * [ ] Integrate bi-directional current integration (Ah coulomb counting) fused with the OCV-based LFP lookup curve via a complementary/Kalman filter.
+  * [ ] Automatic 100% SOC top-balance reset when cell voltages reach absorption knee (`3.45V/cell`) and tail current drops below threshold.
+* [ ] **Phase 3 — Cell-Level Telemetry, Alerting & Protection State Machine (~8 hrs)**
+  * [ ] Expose per-pack 8S individual cell voltage bars (`Cell 1..8`) and thermistor readings on the web dashboard.
+  * [ ] Implement configurable safety trip thresholds (over-voltage, under-voltage, over-temp, stale CAN bus watchdog) with relay/contactor GPIO control and webhook/MQTT alerts.
+* [ ] **Phase 4 — Historical Analytics, CSV/SQLite Export & Automated Test Suite (~8 hrs)**
+  * [ ] Add multi-day/week downsampled rollup storage and CSV/JSON export endpoints in `daemon/web_server.py`.
+  * [ ] Build a virtual SocketCAN (`vcan0`) + mock serial `pytest` suite covering multi-pack CMU daisy-chain frame decoding (`0xAA..0xB1`), aggregator edge cases, and Pylontech protocol frame synthesis.
+* [ ] **Phase 5 — Multi-Inverter Protocol Profiles (~5 hrs)**
+  * [ ] Add selectable inverter protocol profiles in `config/` for Victron (`VE.Can` / SMA Sunny Island), Growatt, and EG4/Luxpower CAN/RS-485 dialects.
+
+---
+
+## 📄 License
+
+Released under the [MIT License](LICENSE).

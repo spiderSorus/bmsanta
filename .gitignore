@@ -18,3 +18,8 @@ venv/
 zero.tmp
 data/
 *.tmp
+
+# Environment & secrets
+.env
+.env.*
+!.env.example

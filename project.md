@@ -221,7 +221,7 @@ The discovery poller in `daemon/battery_bus.py` scans `0xAA..0xB1` with a `quiet
 ## 8. Deployment, Packaging & Backup Strategy
 
 ### 8.1 Automated Installation
-The repository includes an all-in-one automated installer [`install.sh`](file:///Users/csorus/Workspace/bmsanta/install.sh):
+The repository includes an all-in-one automated installer [`install.sh`](install.sh):
 ```bash
 git clone https://github.com/<user>/bmsanta.git ~/bmsanta
 cd ~/bmsanta
@@ -229,7 +229,7 @@ sudo ./install.sh
 ```
 
 ### 8.2 Standalone Release Packaging
-Run [`package.sh`](file:///Users/csorus/Workspace/bmsanta/package.sh) to generate an offline, self-contained distribution archive:
+Run [`package.sh`](package.sh) to generate an offline, self-contained distribution archive:
 ```bash
 ./package.sh
 # Outputs: dist/bmsanta-v0.1.0.tar.gz + SHA-256 checksum

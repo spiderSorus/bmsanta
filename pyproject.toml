@@ -7,9 +7,10 @@ name = "bmsanta"
 version = "0.1.0"
 description = "BMS Controller & Inverter Gateway for CATL 24V LBM025100A Battery Modules"
 authors = [
-    { name = "BMSanta Team" }
+    { name = "Charlotte Sorus" }
 ]
-readme = "project.md"
+license = { text = "MIT" }
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "pyserial>=3.5",
